@@ -126,11 +126,14 @@ class CalibratedSelfAttention(nn.Module):
         self.attn = None
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, query, key, value, calibration=None):
+    def forward(self, query, key, value, calibration=None, mask=None):
         "Implements Figure 2"
         if calibration is not None:
             # Same mask applied to all h heads.
             calibration = calibration.unsqueeze(1)
+        if mask is not None:
+            # Same mask applied to all h heads.
+            mask = mask.unsqueeze(1)
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
@@ -144,7 +147,7 @@ class CalibratedSelfAttention(nn.Module):
         value = value.transpose(1, 2)
 
         # 2) Apply attention on all the projected vectors in batch.
-        x, self.attn = self.attention(query, key, value, calibration=calibration)
+        x, self.attn = self.attention(query, key, value, calibration=calibration, mask=mask)
 
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous() \
@@ -163,6 +166,8 @@ class CalibratedSelfAttention(nn.Module):
         # print(mask.shape)
         if calibration is not None:
             scores = scores * calibration
+        if mask is not None:
+            scores += (mask * -1e9)
             # attention weights
         p_attn = F.softmax(scores, dim=-1)
         return torch.matmul(p_attn, value), p_attn
@@ -232,9 +237,9 @@ class EncoderLayer(nn.Module):
         self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
 
-    def forward(self, x, calibration):
+    def forward(self, x, calibration, mask):
 
-        attn_output = self.cattn(x, x, x, calibration)
+        attn_output = self.cattn(x, x, x, calibration, mask)
         x = self.layernorm1(x + attn_output)
 
         ffn_output = self.ffn(x)
@@ -243,7 +248,7 @@ class EncoderLayer(nn.Module):
         return x
     
 class Encoder(nn.Module):
-    def __init__(self, vocab_size, d_model, num_heads, dff, num_layers):
+    def __init__(self, num_layers, vocab_size, d_model, num_heads, dff):
 
         super().__init__()
 
@@ -258,7 +263,7 @@ class Encoder(nn.Module):
 
         self.detector = DetectionNet(d_model)
 
-    def forward(self, x):
+    def forward(self, x, mask):
 
         x = self.embedding(x)
         
@@ -269,9 +274,9 @@ class Encoder(nn.Module):
         for layer in self.layers:
 
             if C is None:
-                x = layer(x, None)
+                x = layer(x, None, mask)
             else:
-                x = layer(x, C)
+                x = layer(x, C, mask)
 
             # C = error_prob or calibration
             # P = [batch, seq]
@@ -281,7 +286,7 @@ class Encoder(nn.Module):
             P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
             C = 1 - P_outer
 
-        return x
+        return x, P
     
 class DecoderLayer(nn.Module):
     """Decoder is made of self-attn, src-attn, and feed forward (defined below)"""
@@ -399,14 +404,14 @@ class ChannelDecoder(nn.Module):
         return output
     
 # Model
-class DeepSC(nn.Module):
+class CA_DeepSC(nn.Module):
     """Complete DeepSC model combining semantic and channel coding
     Input: Token indices [batch_size, seq_len]
     Output: Vocabulary logits [batch_size, seq_len, vocab_size]"""
 
     def __init__(self, num_layers, src_vocab_size, trg_vocab_size, src_max_len,
                  trg_max_len, d_model, num_heads, dff, dropout=0.1):
-        super(DeepSC, self).__init__()
+        super(CA_DeepSC, self).__init__()
 
         # Semantic encoder
         # Input: [batch_size, seq_len] -> Output: [batch_size, seq_len, d_model]

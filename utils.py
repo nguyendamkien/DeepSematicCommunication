@@ -519,7 +519,7 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
 
     return loss.item(), snr
 
-def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
+def val_step(model, src, trg, n_var, pad, criterion, channel):
     model.eval()
     with torch.no_grad():
         trg_inp = trg[:, :-1]
@@ -1033,3 +1033,207 @@ def plot_bleu_vs_snr(data_dict,
     plt.savefig('figure1.png')  # Ensure unique filename if needed
     plt.show()
     plt.close()
+
+def add_semantic_noise(src, vocab_size, prob=0.1, pad_idx=0):
+    noisy = src.clone()
+
+    batch_size, seq_len = src.size()
+    valid_tokens = list(range(5, vocab_size))
+
+    noise_types = ["substitute", "insert", "delete", "verb"]
+    probs = [0.4, 0.2, 0.2, 0.2]
+
+#    noise_map = [["none"] * seq_len for _ in range(batch_size)]
+
+    for i in range(batch_size):
+        for j in range(seq_len):
+
+            # bo 4 token dac biet
+            if src[i, j] <= 4: 
+                continue
+
+            if random.random() < prob:
+
+                noise_type = random.choices(noise_types, probs)[0]
+               # noise_map[i][j] = noise_type
+
+                if noise_type == "substitute":
+                    noisy[i, j] = random.choice(valid_tokens)
+
+                elif noise_type == "delete":
+                    noisy[i, j] = pad_idx
+
+                elif noise_type == "insert":
+                    if j < seq_len - 1 and src[i, j+1] != pad_idx:
+                        noisy[i, j+1] = noisy[i, j]
+                        noisy[i, j] = random.choice(valid_tokens)
+
+                elif noise_type == "verb":
+                    delta = random.randint(-10, 10)
+                    new_token = src[i, j] + delta
+                    if 4 <= new_token < vocab_size:
+                        noisy[i, j] = new_token
+                    else:
+                        noisy[i, j] = random.choice(valid_tokens)
+
+    return noisy
+
+def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel, bce_loss_fn, num_vocab):
+    model.train()
+    trg_inp = trg[:, :-1]
+    trg_real = trg[:, 1:]
+    channels = Channels()
+
+    if channel == '3GPP':
+        # Random distance for diversity
+        distance = random.uniform(10, 2000)
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5,
+            tx_power_dB=23,
+            seed=None,
+            snr_db=random.uniform(0, 20),  # Random SNR for robustness
+        )
+
+    # remove former gradient
+    opt.zero_grad()
+
+    # mask for transformer
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+    # src_mask = src_mask.unsqueeze(1).unsqueeze(2) - kiem tra shape
+
+    # add semantic noise
+    noisy_src = add_semantic_noise(src, num_vocab)
+
+    true_error_label = ((src != noisy_src) & (src != pad)).float()
+
+    # encoder + channel encoder
+    enc_output = model.encoder(noisy_src, src_mask)
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # Channel transmission
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+        # Log for debugging
+        # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
+        #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
+
+    # channel decoder + decoder
+    channel_dec_output = model.channel_decoder(Rx_sig)
+    dec_output, pred_error_prob = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                               src_mask)
+    pred = model.dense(dec_output)
+    ntokens = pred.size(-1)
+
+    # calculate loss
+    loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
+                         trg_real.contiguous().view(-1), pad, criterion)
+    
+    # BCE loss
+    mask = (src != pad).float()
+
+    loss_bce = (bce_loss_fn(pred_error_prob, true_error_label) * mask).sum() / mask.sum()
+    # loss_bce = bce_loss_fn(pred_error_prob, true_error_label.float())
+
+    loss = loss_ce + 1.0 * loss_bce
+    
+    # backprop + update
+    loss.backward()
+    opt.step()
+
+    return loss.item(), snr
+
+def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_loss_fn, num_vocab):
+    model.eval()
+    with torch.no_grad():
+        trg_inp = trg[:, :-1]
+        trg_real = trg[:, 1:]
+        channels = Channels()
+
+        if channel == '3GPP':
+            # Random distance for diversity, fixed SNR for validation
+            distance = random.uniform(10, 2000)
+            deepsc_channel = DeepSCChannel(
+                scenario='UMa',
+                tx_pos=(0, 0, 25),
+                rx_pos=(distance, 0, 1.5),
+                fc=3.5,
+                tx_power_dB=23,
+                seed=None,
+                snr_db=10,  # Fixed SNR at 10 dB for validation
+            )
+
+        src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+        noisy_src = add_semantic_noise(src, num_vocab)
+        true_error_label = ((src != noisy_src) & (src != pad)).float()
+
+        enc_output = model.encoder(src, src_mask)
+        channel_enc_output = model.channel_encoder(enc_output)
+        Tx_sig = power_normalize(channel_enc_output)
+
+        if channel == 'AWGN':
+            Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+        elif channel == 'Rayleigh':
+            Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+        elif channel == 'Rician':
+            Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+        elif channel == 'TimeVaryingRician':
+            Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+        elif channel == '3GPP':
+            batch_size, seq_len, features = Tx_sig.shape
+            assert features % 2 == 0, "Features must be even"
+            Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+            Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                           Tx_sig_complex[..., 1])
+            Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+                Tx_sig_complex)
+            Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len,
+                                                     features)
+            snr = 10 * np.log10(
+                rx_signal_power / noise_power) if noise_power > 0 else -100
+            # Log for debugging
+            # print(f"Val - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
+            #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
+
+        channel_dec_output = model.channel_decoder(Rx_sig)
+        dec_output, pred_error_prob = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                                   src_mask)
+        pred = model.dense(dec_output)
+        ntokens = pred.size(-1)
+        loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
+                             trg_real.contiguous().view(-1), pad, criterion)
+        
+        # BCE loss
+        mask = (trg_real != pad).float()
+
+        loss_bce = (bce_loss_fn(pred_error_prob, true_error_label) * mask).sum() / mask.sum()
+        
+        # loss_bce = bce_loss_fn(pred_error_prob, true_error_label.float())
+
+        loss = loss_ce + 1.0 * loss_bce
+        
+
+    return loss.item(), snr
+    
