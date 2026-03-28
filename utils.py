@@ -1111,7 +1111,7 @@ def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel,
     true_error_label = ((src != noisy_src) & (src != pad)).float()
 
     # encoder + channel encoder
-    enc_output = model.encoder(noisy_src, src_mask)
+    enc_output, pred_error_prob = model.encoder(noisy_src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
     Tx_sig = power_normalize(channel_enc_output)
 
@@ -1141,7 +1141,7 @@ def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel,
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
-    dec_output, pred_error_prob = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
                                src_mask)
     pred = model.dense(dec_output)
     ntokens = pred.size(-1)
@@ -1189,8 +1189,8 @@ def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_lo
         noisy_src = add_semantic_noise(src, num_vocab)
         true_error_label = ((src != noisy_src) & (src != pad)).float()
 
-        enc_output = model.encoder(src, src_mask)
-        channel_enc_output = model.channel_encoder(enc_output)
+        enc_output, pred_error_prob = model.encoder(noisy_src, src_mask)
+        channel_enc_output= model.channel_encoder(enc_output)
         Tx_sig = power_normalize(channel_enc_output)
 
         if channel == 'AWGN':
@@ -1218,7 +1218,7 @@ def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_lo
             #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
         channel_dec_output = model.channel_decoder(Rx_sig)
-        dec_output, pred_error_prob = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+        dec_output= model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
                                    src_mask)
         pred = model.dense(dec_output)
         ntokens = pred.size(-1)

@@ -248,24 +248,26 @@ class EncoderLayer(nn.Module):
         return x
     
 class Encoder(nn.Module):
-    def __init__(self, num_layers, vocab_size, d_model, num_heads, dff):
+    def __init__(self, num_layers, src_vocab_size, max_len, d_model, num_heads, dff, drop_out=0.1):
 
         super().__init__()
 
-        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.d_model = d_model
 
-        self.pos_encoding = PositionalEncoding(d_model, 0.1)
+        self.embedding = nn.Embedding(src_vocab_size, d_model)
+
+        self.pos_encoding = PositionalEncoding(d_model, drop_out, max_len)
 
         self.layers = nn.ModuleList([
-            EncoderLayer(d_model, num_heads, dff)
+            EncoderLayer(d_model, num_heads, dff, drop_out)
             for _ in range(num_layers)
         ])
 
         self.detector = DetectionNet(d_model)
 
-    def forward(self, x, mask):
+    def forward(self, x, src_mask):
 
-        x = self.embedding(x)
+        x = self.embedding(x) * math.sqrt(self.d_model)
         
         x = self.pos_encoding(x)
 
@@ -274,9 +276,9 @@ class Encoder(nn.Module):
         for layer in self.layers:
 
             if C is None:
-                x = layer(x, None, mask)
+                x = layer(x, None, src_mask)
             else:
-                x = layer(x, C, mask)
+                x = layer(x, C, src_mask)
 
             # C = error_prob or calibration
             # P = [batch, seq]
