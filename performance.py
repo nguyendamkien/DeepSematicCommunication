@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BertModel, BertTokenizer
 
-from dataset import EurDataset, collate_data
+from dataset import EurDataset, collate_pair_data
 from models.transceiver import DeepSC
 from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
     save_evaluation_scores, load_checkpoint
@@ -142,7 +142,7 @@ def performance(args, SNR, net):
     bleu_score_1gram = BleuScore(1, 0, 0, 0)
 
     print("Loading test dataset...")
-    test_eur = EurDataset('test')
+    test_eur = EurDataset('noisy_test')
     StoT = SeqtoText(token_to_idx, end_idx)
 
     final_bleu = []
@@ -179,20 +179,20 @@ def performance(args, SNR, net):
                 # Reload DataLoader for each epoch
                 test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
                                            num_workers=0, pin_memory=True,
-                                           collate_fn=collate_data)
+                                           collate_fn=collate_pair_data)
 
                 samples_processed = 0  # Track the number of samples processed
 
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, sents in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, trg) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 
-                        sents = sents.to(device)
-                        target = sents
-                        out, snr_value = greedy_decode(net, sents, noise_std,
+                        noise_sents = noise_sents.to(device)
+                        target = trg.to(device)
+                        out, snr_value = greedy_decode(net, noise_sents, noise_std,
                                                        args.MAX_LENGTH, pad_idx,
                                                        start_idx,
                                                        args.channel, device)
@@ -206,7 +206,7 @@ def performance(args, SNR, net):
                         target_word.extend(result_string)
 
                         # Update samples processed
-                        batch_size = sents.size(0)
+                        batch_size = noise_sents.size(0)
                         samples_processed += batch_size
                         pbar.update(batch_size)
 
