@@ -1233,7 +1233,207 @@ def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_lo
         # loss_bce = bce_loss_fn(pred_error_prob, true_error_label.float())
 
         loss = loss_ce + 1.0 * loss_bce
-        
 
     return loss.item(), snr
+
+def greedy_decode_calibration(model, src, n_var, max_len, padding_idx, start_symbol,
+                  channel, device):
+    """
+    Greedy decoder for inference/validation, supporting 3GPP channel with fixed distance and SNR.
+    """
+    channels = Channels()
+    src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor).to(
+        device)  # [batch, 1, seq_len]
+
+    # Encoder and channel encoding (same as train_step)
+    enc_output, pred_error_prob = model.encoder(src, src_mask)
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(
+        channel_enc_output)  # Assuming power_normalize is defined
+
+    # Channel simulation
+    if channel == '3GPP':
+        # Fixed distance and SNR for validation
+        distance = 1000  # Fixed at 1000 meters
+        snr_db = 10  # Fixed at 10 dB
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5,
+            tx_power_dB=23,
+            seed=None,
+            snr_db=snr_db,
+        )
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+    elif channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    else:
+        raise ValueError(
+            "Please choose from AWGN, Rayleigh, Rician, TimeVaryingRician, or 3GPP")
+
+    # Decode received signal
+    memory = model.channel_decoder(Rx_sig)
+
+    # Initialize output sequence with start symbol
+    outputs = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
+
+    # Autoregressive generation
+    for i in range(max_len - 1):
+        trg_mask = (outputs == padding_idx).unsqueeze(-2).type(
+            torch.FloatTensor).to(device)
+        look_ahead_mask = subsequent_mask(outputs.size(1)).type(
+            torch.FloatTensor).to(device)
+        combined_mask = torch.max(trg_mask, look_ahead_mask)
+        # Generate next token
+        dec_output = model.decoder(outputs, memory, combined_mask, src_mask)
+        pred = model.dense(dec_output)
+        # Select most probable token for next position
+        prob = pred[:, -1:, :]  # (batch_size, 1, vocab_size)
+        _, next_word = torch.max(prob, dim=-1)
+        # Append new token to output sequence
+        outputs = torch.cat([outputs, next_word], dim=1)
+
+    return outputs, snr
+
+
+def debug_greedy_decode_calibration(model, src, n_var, max_len, padding_idx, start_symbol,
+                        channel, seq_to_text=None):
+    """Enhanced greedy decode with symbol rate, channel analysis, and signal integrity checks"""
+    channels = Channels()
+    device = src.device
+
+    def print_step(step_name, tensor, show_values=True, limit=5):
+        print(f"\n{'=' * 10} {step_name} {'=' * 10}")
+        print(f"Shape: {list(tensor.shape)}")
+        print(f"Dtype: {tensor.dtype}")
+        if show_values and tensor.numel() < 200:
+            print(f"Values:\n{tensor.cpu().detach().numpy()[:limit]}")
+            if seq_to_text and tensor.dim() == 2:
+                try:
+                    text = seq_to_text.sequence_to_text(
+                        tensor[0].cpu().numpy().tolist())
+                    print(f"First sequence (text): {text}")
+                except Exception as e:
+                    print(f"[Warning] Could not convert to text: {e}")
+        # Signal integrity check (only for floating-point or complex tensors)
+        if tensor.dtype in [torch.float16, torch.float32, torch.float64,
+                            torch.complex64, torch.complex128]:
+            print(
+                f"Mean: {tensor.mean().item():.4f}, Std: {tensor.std().item():.4f}")
+        else:
+            print(
+                "Mean and Std skipped: Tensor dtype is not floating-point or complex")
+
+    # Input Processing
+    print_step("Input Sequence", src)
+
+    # Source Mask
+    src_mask = (src == padding_idx).unsqueeze(-2).float().to(device)
+    print_step("Source Mask", src_mask)
+
+    # Encoder Pass
+    enc_output, p = model.encoder(src.to(device), src_mask.to(device))
+    print_step("Encoder Output", enc_output)
+
+    # Channel Encoding with Modulation Analysis
+    channel_enc_output = model.channel_encoder(enc_output.to(device))
+    print_step("Channel Encoder Output", channel_enc_output)
+
+    # Symbol Rate Estimation
+    print(f"\n{'=' * 10} Symbol Rate Estimation {'=' * 10}")
+    batch_size, seq_len, feat_dim = channel_enc_output.shape
+    symbols_per_token = feat_dim // 2  # Assuming 2 dims per complex symbol
+    total_symbols = seq_len * symbols_per_token
+    print(f"Tokens: {seq_len}, Features per token: {feat_dim}")
+    print(
+        f"Symbols per token: {symbols_per_token}, Total symbols: {total_symbols}")
+    assumed_time = 0.045  # Hypothetical duration (45 ms, adjustable)
+    Rs_est = total_symbols / assumed_time
+    print(
+        f"Assumed transmission time: {assumed_time} s, Estimated Rs: {Rs_est:.2f} symbols/s")
+
+    # Modulation Analysis (Pre-Channel)
+    try:
+        real_imag = channel_enc_output.view(batch_size, seq_len,
+                                            symbols_per_token, 2)
+        symbols = real_imag[..., 0] + 1j * real_imag[..., 1]
+        avg_magnitude_pre = torch.mean(torch.abs(symbols))
+        print(f"Pre-channel avg symbol magnitude: {avg_magnitude_pre:.4f}")
+    except Exception as e:
+        print(f"[Warning] Pre-channel modulation analysis failed: {e}")
+
+    # Power Normalization
+    Tx_sig = power_normalize(channel_enc_output)
+    print_step("Transmitted Signal", Tx_sig)
+
+    # Channel Simulation with Detailed SNR
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    else:
+        raise ValueError(
+            "Please choose from AWGN, Rayleigh, Rician, or TimeVaryingRician")
+    print_step("Received Signal", Rx_sig)
+    print(f"Noise Variance: {n_var}, SNR: {snr:.2f} dB")
+
+    # Post-Channel Modulation Analysis
+    print(f"\n{'=' * 10} Post-Channel Analysis {'=' * 10}")
+    try:
+        real_imag_post = Rx_sig.view(batch_size, seq_len, symbols_per_token, 2)
+        symbols_post = real_imag_post[..., 0] + 1j * real_imag_post[..., 1]
+        avg_magnitude_post = torch.mean(torch.abs(symbols_post))
+        print(f"Post-channel avg symbol magnitude: {avg_magnitude_post:.4f}")
+    except Exception as e:
+        print(f"[Warning] Post-channel modulation analysis failed: {e}")
+
+    # Channel Decoding
+    memory = model.channel_decoder(Rx_sig.to(device))
+    print_step("Channel Decoder Output", memory)
+
+    # Initialize Output
+    outputs = torch.full((src.size(0), 1), start_symbol, dtype=src.dtype,
+                         device=device)
+    print_step("Initial Output", outputs)
+
+    # Autoregressive Decoding
+    for i in range(max_len - 1):
+        trg_mask = (outputs == padding_idx).unsqueeze(-2).float()
+        look_ahead_mask = subsequent_mask(outputs.size(1)).float()
+        combined_mask = torch.max(trg_mask.to(device),
+                                  look_ahead_mask.to(device))
+        dec_output = model.decoder(outputs, memory, combined_mask, None)
+        pred = model.dense(dec_output)
+        _, next_word = torch.max(pred[:, -1:, :], dim=-1)
+        outputs = torch.cat([outputs, next_word.to(device)], dim=1)
+        if next_word.item() == seq_to_text.end_idx:
+            break
+
+    # Final Output
+    print("\n=== Final Output (First Sequence) ===")
+    if seq_to_text:
+        text = seq_to_text.sequence_to_text(outputs[0].cpu().numpy().tolist())
+        print(f"Sequence 1: {text}")
+
+    return outputs
     
