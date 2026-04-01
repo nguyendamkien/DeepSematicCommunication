@@ -153,7 +153,7 @@ class CalibratedMultiHeadAttention(nn.Module):
 
         out = self.dropout(out)
 
-        return out
+        return out, attn, attn_perturb_weight, mask_perturbation
     
     def attention(self, query, key, value, mask=None):
         """Compute 'Scaled Dot Product Attention'"""
@@ -313,13 +313,13 @@ class EncoderLayer(nn.Module):
             mask: [batch_size, 1, seq_len] - Attention mask
         Output: [batch_size, seq_len, d_model]
         """
-        attn_output = self.mha(x, x, x, mask)
+        attn_output, attn, attn_p, m = self.mha(x, x, x, mask)
         x = self.layernorm1(x + attn_output)
 
         ffn_output = self.ffn(x)
         x = self.layernorm2(x + ffn_output)
 
-        return x
+        return x, attn, attn_p, m
     
 class DecoderLayer(nn.Module):
     """Decoder is made of self-attn, src-attn, and feed forward (defined below)"""
@@ -353,13 +353,13 @@ class DecoderLayer(nn.Module):
         # m = memory
 
         # 1. Masked self-attention (target sequence attending to itself)
-        attn_output = self.self_mha(x, x, x,
+        attn_output, attn1, attn_p1, m1 = self.self_mha(x, x, x,
                                     look_ahead_mask)  # Q, K, V are all 'x'
         x = self.layernorm1(
             x + attn_output)  # Residual connection + normalization
 
         # 2. Cross-attention (decoder attends to encoder output)
-        src_output = self.src_mha(x, memory, memory,
+        src_output,attn2, attn_p2, m2 = self.src_mha(x, memory, memory,
                                   trg_padding_mask)  # Q=x, K=V=memory
         x = self.layernorm2(x + src_output)
 
@@ -367,7 +367,7 @@ class DecoderLayer(nn.Module):
         fnn_output = self.ffn(x)
         x = self.layernorm3(x + fnn_output)
 
-        return x
+        return x, (attn1, attn2), (attn_p1, attn_p2), (m1, m2)
     
 class Encoder(nn.Module):
     """Core encoder is a stack of N layers"""
@@ -399,10 +399,18 @@ class Encoder(nn.Module):
         x = self.embedding(x) * math.sqrt(self.d_model)
         x = self.pos_encoding(x)
 
-        for enc_layer in self.enc_layers:
-            x = enc_layer(x, src_mask)
+        attn_list = []
+        attn_p_list = []
+        mask_list = []
 
-        return x
+        for enc_layer in self.enc_layers:
+            x, attn, attn_p, m = enc_layer(x, src_mask)
+
+            attn_list.append(attn)
+            attn_p_list.append(attn_p)
+            mask_list.append(m)
+
+        return x, attn_list, attn_p_list, mask_list
     
 class Decoder(nn.Module):
     """Complete semantic decoder
@@ -436,10 +444,18 @@ class Decoder(nn.Module):
         x = self.pos_encoding(x)  # Add positional encoding
 
         # Pass through each decoder layer
-        for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+        attn_list = []
+        attn_p_list = []
+        mask_list = []
 
-        return x  # Final decoder output
+        for dec_layer in self.dec_layers:
+            x, attn, attn_p, m = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+
+            attn_list.append(attn)
+            attn_p_list.append(attn_p)
+            mask_list.append(m)
+
+        return x, attn_list, attn_p_list, mask_list
     
 class ChannelDecoder(nn.Module):
     """Channel decoder for converting channel-coded features back to semantic space

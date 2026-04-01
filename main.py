@@ -25,7 +25,7 @@ plt.ion() # Turn on interactive mode
 parser = argparse.ArgumentParser()
 parser.add_argument('--vocab-file', default='vocab.json', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='/kaggle/working/checkpoints/deepsc-AWGN',
+                    default='/kaggle/working/checkpoints/mask-deepsc-AWGN',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str,
                     help='Please choose AWGN, Rayleigh, and Rician')

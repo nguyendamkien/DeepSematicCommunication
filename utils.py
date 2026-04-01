@@ -68,15 +68,21 @@ def subsequent_mask(size):
     """
     Mask out subsequent positions.
     """
+    #shape of tensor, batch = 1, matrix attention size * size
     attn_shape = (1, size, size)
-    # 产生下三角矩阵
+    """
+    [[0 1 1 1]
+    [0 0 1 1]
+    [0 0 0 1]
+    [0 0 0 0]]
+    """
     subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask)
 
 def create_masks(src, trg, padding_idx):
-    # Create mask for source sequence padding
+    # Create mask for source sequence padding - for encoder to mask pad
     src_mask = (src == padding_idx).unsqueeze(-2).type(
-        torch.FloatTensor)  # [batch, 1, seq_len]
+        torch.FloatTensor)  # [batch, 1 (unsqueeze(-2) - ap chot), seq_len]
     # Create mask for target sequence padding
     trg_mask = (trg == padding_idx).unsqueeze(-2).type(
         torch.FloatTensor)  # [batch, 1, seq_len]
@@ -1033,3 +1039,212 @@ def plot_bleu_vs_snr(data_dict,
     plt.savefig('figure1.png')  # Ensure unique filename if needed
     plt.show()
     plt.close()
+
+def train_step_mask(model, src, trg, n_var, pad, opt, criterion, channel):
+    model.train()
+    trg_inp = trg[:, :-1]
+    trg_real = trg[:, 1:]
+    channels = Channels()
+
+    if channel == '3GPP':
+        distance = random.uniform(10, 2000)
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5,
+            tx_power_dB=23,
+            seed=None,
+            snr_db=random.uniform(0, 20),
+        )
+
+    # ===== reset gradient =====
+    opt.zero_grad()
+
+    # ===== mask =====
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+    # ===== encoder =====
+    enc_output, enc_attn, enc_attn_p, enc_mask = model.encoder(src, src_mask)
+
+    # ===== channel encoder =====
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # ===== channel =====
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+
+    # ===== channel decoder =====
+    channel_dec_output = model.channel_decoder(Rx_sig)
+
+    # ===== decoder =====
+    dec_output, dec_attn, dec_attn_p, dec_mask = model.decoder(
+        trg_inp, channel_dec_output, look_ahead_mask, src_mask
+    )
+
+    pred = model.dense(dec_output)
+    ntokens = pred.size(-1)
+
+    # ===== 1. semantic loss =====
+    loss_semantic = loss_function(
+        pred.contiguous().view(-1, ntokens),
+        trg_real.contiguous().view(-1),
+        pad,
+        criterion
+    )
+
+    # ===== 2. collect all attn + mask =====
+    attn_list = enc_attn + dec_attn
+    attn_p_list = enc_attn_p + dec_attn_p
+    mask_list = enc_mask + dec_mask
+
+    # ===== 3. sparsity loss =====
+    alpha = 0.01
+    loss_sparse = 0
+
+    for m in mask_list:
+        if isinstance(m, tuple):  # decoder có (m1, m2)
+            for mm in m:
+                loss_sparse += torch.mean((1 - mm) ** 2)
+        else:
+            loss_sparse += torch.mean((1 - m) ** 2)
+
+    # ===== 4. attention consistency loss =====
+    beta = 0.01
+    loss_attn = 0
+
+    for attn, attn_p in zip(attn_list, attn_p_list):
+        if isinstance(attn, tuple):
+            for a, ap in zip(attn, attn_p):
+                loss_attn += torch.mean((a - ap) ** 2)
+        else:
+            loss_attn += torch.mean((attn - attn_p) ** 2)
+
+    # ===== 5. total loss =====
+    loss = loss_semantic + alpha * loss_sparse + beta * loss_attn
+
+    # ===== backward =====
+    loss.backward()
+    opt.step()
+
+    return loss.item(), snr
+
+def val_step_mask(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
+    model.eval()
+    with torch.no_grad():
+        trg_inp = trg[:, :-1]
+        trg_real = trg[:, 1:]
+        channels = Channels()
+
+        if channel == '3GPP':
+            # Random distance for diversity, fixed SNR for validation
+            distance = random.uniform(10, 2000)
+            deepsc_channel = DeepSCChannel(
+                scenario='UMa',
+                tx_pos=(0, 0, 25),
+                rx_pos=(distance, 0, 1.5),
+                fc=3.5,
+                tx_power_dB=23,
+                seed=None,
+                snr_db=10,  # Fixed SNR at 10 dB for validation
+            )
+
+        src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+        # ===== encoder =====
+    enc_output, enc_attn, enc_attn_p, enc_mask = model.encoder(src, src_mask)
+
+    # ===== channel encoder =====
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # ===== channel =====
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+
+    # ===== channel decoder =====
+    channel_dec_output = model.channel_decoder(Rx_sig)
+
+    # ===== decoder =====
+    dec_output, dec_attn, dec_attn_p, dec_mask = model.decoder(
+        trg_inp, channel_dec_output, look_ahead_mask, src_mask
+    )
+
+    pred = model.dense(dec_output)
+    ntokens = pred.size(-1)
+
+    # ===== 1. semantic loss =====
+    loss_semantic = loss_function(
+        pred.contiguous().view(-1, ntokens),
+        trg_real.contiguous().view(-1),
+        pad,
+        criterion
+    )
+
+    # ===== 2. collect all attn + mask =====
+    attn_list = enc_attn + dec_attn
+    attn_p_list = enc_attn_p + dec_attn_p
+    mask_list = enc_mask + dec_mask
+
+    # ===== 3. sparsity loss =====
+    alpha = 0.01
+    loss_sparse = 0
+
+    for m in mask_list:
+        if isinstance(m, tuple):  # decoder có (m1, m2)
+            for mm in m:
+                loss_sparse += torch.mean((1 - mm) ** 2)
+        else:
+            loss_sparse += torch.mean((1 - m) ** 2)
+
+    # ===== 4. attention consistency loss =====
+    beta = 0.01
+    loss_attn = 0
+
+    for attn, attn_p in zip(attn_list, attn_p_list):
+        if isinstance(attn, tuple):
+            for a, ap in zip(attn, attn_p):
+                loss_attn += torch.mean((a - ap) ** 2)
+        else:
+            loss_attn += torch.mean((attn - attn_p) ** 2)
+
+    # ===== 5. total loss =====
+    loss = loss_semantic + alpha * loss_sparse + beta * loss_attn
+
+    return loss.item(), snr
