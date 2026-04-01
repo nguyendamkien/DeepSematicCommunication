@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+"create mask nt, perturb attention"
 class MaskPerturbation(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -85,6 +87,56 @@ class AttentionCalibration(nn.Module):
         attn_comb = g * attn + (1 - g) * attn_cal
 
         return F.softmax(attn_comb, dim=-1)
+    
+class CalibratedMultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.head_dim = d_model // num_heads
+
+        self.q_linear = nn.Linear(d_model, d_model)
+        self.k_linear = nn.Linear(d_model, d_model)
+        self.v_linear = nn.Linear(d_model, d_model)
+
+        self.out = nn.Linear(d_model, d_model)
+
+        self.mask_model = MaskPerturbation(d_model)
+        self.calibration = AttentionCalibration(d_model)
+
+    def forward(self, Q, K, V):
+        batch_size = Q.size(0)
+
+        # linear
+        Q = self.q_linear(Q)
+        K = self.k_linear(K)
+        V = self.v_linear(V)
+
+        # reshape
+        def split_heads(x):
+            return x.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        Qh, Kh, Vh = split_heads(Q), split_heads(K), split_heads(V)
+
+        # attention gốc
+        scores = torch.matmul(Qh, Kh.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn = F.softmax(scores, dim=-1)
+
+        # mask perturbation
+        mask = self.mask_model(Q, K)
+
+        # calibration
+        attn_cal = calibrate_attention(attn, mask)
+
+        # combine
+        attn_final = self.calibration(Q, attn, attn_cal)
+
+        # output
+        out = torch.matmul(attn_final, Vh)
+
+        out = out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+
+        return self.out(out)
 
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
@@ -110,81 +162,81 @@ class PositionalEncoding(nn.Module):
         return x
 
 
-class MultiHeadedAttention(nn.Module):
-    def __init__(self, num_heads, d_model, dropout=0.1):
-        "Take in model size and number of heads."
-        super(MultiHeadedAttention, self).__init__()
-        assert d_model % num_heads == 0
-        # We assume d_v always equals d_k
-        self.d_k = d_model // num_heads
-        self.num_heads = num_heads
+# class MultiHeadedAttention(nn.Module):
+#     def __init__(self, num_heads, d_model, dropout=0.1):
+#         "Take in model size and number of heads."
+#         super(MultiHeadedAttention, self).__init__()
+#         assert d_model % num_heads == 0
+#         # We assume d_v always equals d_k
+#         self.d_k = d_model // num_heads
+#         self.num_heads = num_heads
 
-        self.wq = nn.Linear(d_model, d_model)
-        self.wk = nn.Linear(d_model, d_model)
-        self.wv = nn.Linear(d_model, d_model)
+#         self.wq = nn.Linear(d_model, d_model)
+#         self.wk = nn.Linear(d_model, d_model)
+#         self.wv = nn.Linear(d_model, d_model)
 
-        self.dense = nn.Linear(d_model, d_model)
+#         self.dense = nn.Linear(d_model, d_model)
 
-        # self.linears = clones(nn.Linear(d_model, d_model), 4)
-        self.attn = None
-        self.dropout = nn.Dropout(p=dropout)
+#         # self.linears = clones(nn.Linear(d_model, d_model), 4)
+#         self.attn = None
+#         self.dropout = nn.Dropout(p=dropout)
 
-        self.mask_model = MaskPerturbation(d_model)
-        self.calibration = AttentionCalibration(d_model)    
+#         self.mask_model = MaskPerturbation(d_model)
+#         self.calibration = AttentionCalibration(d_model)    
 
-    def forward(self, query, key, value, mask=None):
-        "Implements Figure 2"
-        if mask is not None:
-            # Same mask applied to all h heads.
-            mask = mask.unsqueeze(1)
-        nbatches = query.size(0)
+#     def forward(self, query, key, value, mask=None):
+#         "Implements Figure 2"
+#         if mask is not None:
+#             # Same mask applied to all h heads.
+#             mask = mask.unsqueeze(1)
+#         nbatches = query.size(0)
 
-        # 1) Do all the linear projections in batch from d_model => h x d_k
-        query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
-        query = query.transpose(1, 2)
+#         # 1) Do all the linear projections in batch from d_model => h x d_k
+#         query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
+#         query = query.transpose(1, 2)
 
-        key = self.wk(key).view(nbatches, -1, self.num_heads, self.d_k)
-        key = key.transpose(1, 2)
+#         key = self.wk(key).view(nbatches, -1, self.num_heads, self.d_k)
+#         key = key.transpose(1, 2)
 
-        value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
-        value = value.transpose(1, 2)
+#         value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
+#         value = value.transpose(1, 2)
 
-        #        query, key, value = \
-        #            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-        #             for l, x in zip(self.linears, (query, key, value))]
+#         #        query, key, value = \
+#         #            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+#         #             for l, x in zip(self.linears, (query, key, value))]
 
-        # 2) Apply attention on all the projected vectors in batch.
-        x, attn = self.attention(query, key, value, mask=mask)
+#         # 2) Apply attention on all the projected vectors in batch.
+#         x, attn = self.attention(query, key, value, mask=mask)
 
-        mask = self.mask_model(query, key)
+#         mask = self.mask_model(query, key)
 
-        # calibration
-        attn_cal = calibrate_attention(attn, mask)
+#         # calibration
+#         attn_cal = calibrate_attention(attn, mask)
 
-        # combine
-        attn_final = self.calibration(query, attn, attn_cal)
+#         # combine
+#         attn_final = self.calibration(query, attn, attn_cal)
 
-        # 3) "Concat" using a view and apply a final linear.
-        x = x.transpose(1, 2).contiguous() \
-            .view(nbatches, -1, self.num_heads * self.d_k)
+#         # 3) "Concat" using a view and apply a final linear.
+#         x = x.transpose(1, 2).contiguous() \
+#             .view(nbatches, -1, self.num_heads * self.d_k)
 
-        x = self.dense(x)
-        x = self.dropout(x)
+#         x = self.dense(x)
+#         x = self.dropout(x)
 
-        return x
+#         return x
 
-    def attention(self, query, key, value, mask=None):
-        """Compute 'Scaled Dot Product Attention'"""
-        d_k = query.size(-1)
-        scores = torch.matmul(query, key.transpose(-2, -1)) \
-                 / math.sqrt(d_k)
-        # print(mask.shape)
-        if mask is not None:
-            # 根据mask，指定位置填充 -1e9
-            scores += (mask * -1e9)
-            # attention weights
-        p_attn = F.softmax(scores, dim=-1)
-        return torch.matmul(p_attn, value), p_attn
+#     def attention(self, query, key, value, mask=None):
+#         """Compute 'Scaled Dot Product Attention'"""
+#         d_k = query.size(-1)
+#         scores = torch.matmul(query, key.transpose(-2, -1)) \
+#                  / math.sqrt(d_k)
+#         # print(mask.shape)
+#         if mask is not None:
+#             # 根据mask，指定位置填充 -1e9
+#             scores += (mask * -1e9)
+#             # attention weights
+#         p_attn = F.softmax(scores, dim=-1)
+#         return torch.matmul(p_attn, value), p_attn
     
 class PositionwiseFeedForward(nn.Module):
     "Implements FFN equation."
@@ -213,7 +265,7 @@ class EncoderLayer(nn.Module):
 
         # Multi-head attention for processing input sequence
         # Input/Output: [batch_size, seq_len, d_model]
-        self.mha = MultiHeadedAttention(num_heads, d_model, dropout=0.1)
+        self.mha = CalibratedMultiHeadAttention(num_heads, d_model)
 
         # Position-wise feed-forward network
         # Input/Output: [batch_size, seq_len, d_model]
