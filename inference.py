@@ -15,11 +15,12 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import EurDataset, collate_data
+from dataset import EurDataset, collate_pair_data
 from models.transceiver import DeepSC
+from models.transceiver_calibration import CA_DeepSC
 from performance import Similarity
 from utils import SNR_to_noise, greedy_decode, SeqtoText, BleuScore, load_checkpoint, \
-    debug_greedy_decode
+    debug_greedy_decode, greedy_decode_calibration
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data.pkl', type=str)
@@ -29,13 +30,13 @@ parser.add_argument('--vocab-file', default='vocab.json', type=str)
 #                     type=str)
 # parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='./kaggle/working/checkpoints/deepsc-AWGN',
+                    default='./kaggle/working/checkpoints/ca-deepsc-AWGN',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
 parser.add_argument('--batch-size', default=1,
                     type=int)  # Set batch size to 1 for detailed observation
-parser.add_argument('--SNR', default=18, type=int)  # Default SNR for testing
+parser.add_argument('--SNR', default=12, type=int)  # Default SNR for testing
 parser.add_argument('--d-model', default=128, type=int)
 parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--num-layers', default=4, type=int)
@@ -253,7 +254,7 @@ def interactive_test(args, snr, net):
                 #                               start_idx,
                 #                               args.channel,
                 #                               device)
-                decoded, _ = greedy_decode(
+                decoded, _ = greedy_decode_calibration(
                     net, input_tensor, noise_std,
                     args.MAX_LENGTH, pad_idx, start_idx,
                     args.channel, device
@@ -265,9 +266,6 @@ def interactive_test(args, snr, net):
             # Process output tokens
             if isinstance(output_tokens, torch.Tensor):
                 output_tokens = output_tokens.squeeze(0).cpu().numpy().tolist()
-            elif isinstance(output_tokens, list) and isinstance(
-                    output_tokens[0], list):
-                output_tokens = output_tokens[0]
 
             # Loại bỏ token đặc biệt và cắt sau <END>
             clean_tokens = []
@@ -357,7 +355,7 @@ if __name__ == '__main__':
     end_idx = token_to_idx["<END>"]
 
     # Define and load the model
-    deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
+    deepsc = CA_DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
 
     checkpoint = load_checkpoint(args.checkpoint_path, mode='best')
@@ -368,27 +366,28 @@ if __name__ == '__main__':
     else:
         print("No best checkpoint found.")
     # Verify that sentences are correctly padded and that the source mask is properly generated.
-    test_eur = EurDataset('test')  # Load test dataset
+    test_eur = EurDataset('noisy_test')  # Load test dataset
     test_iterator = DataLoader(test_eur, 128,
                                num_workers=0, pin_memory=True,
-                               collate_fn=collate_data)
+                               collate_fn=collate_pair_data)
     seq_to_text = SeqtoText(token_to_idx, end_idx)
     # --- Test một câu từ test set để BLEU cao ---
-    test_dataset = EurDataset('test')
+    test_dataset = EurDataset('noisy_test')
+    print(test_dataset[0][0])
     # Chọn câu đầu tiên từ test set, convert sang tensor
-    sample_sentence_1 = torch.tensor(test_dataset[0], dtype=torch.long).unsqueeze(0).to(device)
-
+    sample_sentence_1 = torch.tensor(test_dataset[4][0], dtype=torch.long).unsqueeze(0).to(device)
+    sample_sentence_2 = torch.tensor(test_dataset[4][1], dtype=torch.long).unsqueeze(0).to(device)
     StoT = SeqtoText(token_to_idx, end_idx)
     bleu_score_calc = BleuScore(1, 0, 0, 0)
     similarity = Similarity(batch_size=1)
 
     with torch.no_grad():
         noise_std = SNR_to_noise(SNR)
-        output_tokens, _ = greedy_decode(deepsc, sample_sentence_1, noise_std,
+        output_tokens, _ = greedy_decode_calibration(deepsc, sample_sentence_1, noise_std,
                                     args.MAX_LENGTH, pad_idx, start_idx, args.channel, device)
 
     # Convert tokens to text
-    input_text = StoT.sequence_to_text(sample_sentence_1.cpu().numpy().tolist()[0])
+    input_text = StoT.sequence_to_text(sample_sentence_2.cpu().numpy().tolist()[0])
     sentence_1 = output_tokens.cpu().numpy().tolist()[0]
     output_text = StoT.sequence_to_text(sentence_1)
     print(sample_sentence_1)
