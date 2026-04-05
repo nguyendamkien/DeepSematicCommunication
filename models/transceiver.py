@@ -110,16 +110,14 @@ class CalibratedMultiHeadAttention(nn.Module):
         self.mask_perturbation_model = MaskPerturbation(d_model)
         self.calibration = AttentionCalibration(d_model)
 
-    def forward(self, query, key, value, mask=None):
+    def forward(self, query, key, value, mask=None, use_perturb=False):
         if mask is not None:
             # Same mask applied to all h heads.
             mask = mask.unsqueeze(1)
         nbatches = query.size(0)
 
         query_origin = query
-
-        # mask perturbation
-        mask_perturbation = self.mask_perturbation_model(query, key)
+        key_origin = key
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
         query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
@@ -131,18 +129,19 @@ class CalibratedMultiHeadAttention(nn.Module):
         value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
         value = value.transpose(1, 2)
 
+        # mask perturbation
+        mask_perturbation = self.mask_perturbation_model(query_origin, key_origin)
 
         # attention gốc
         x, attn = self.attention(query, key, value, mask=mask)
 
-        # attn_perturb_weight
-        attn_perturb_weight = perturb_attention_weight(attn, mask_perturbation)
-
-        # calibration
-        attn_cal = calibrate_attention_weight(attn, mask_perturbation)
-
-        # combine
-        attn_final = self.calibration(query_origin, attn, attn_cal)
+        if use_perturb:
+            # dùng attention bị phá
+            attn_final = perturb_attention_weight(attn, mask_perturbation)
+        else:
+            # calibration
+            attn_cal = calibrate_attention_weight(attn, mask_perturbation)
+            attn_final = self.calibration(query_origin, attn, attn_cal)
 
         # output
         out = torch.matmul(attn_final, value)
@@ -192,81 +191,70 @@ class PositionalEncoding(nn.Module):
         return x
 
 
-# class MultiHeadedAttention(nn.Module):
-#     def __init__(self, num_heads, d_model, dropout=0.1):
-#         "Take in model size and number of heads."
-#         super(MultiHeadedAttention, self).__init__()
-#         assert d_model % num_heads == 0
-#         # We assume d_v always equals d_k
-#         self.d_k = d_model // num_heads
-#         self.num_heads = num_heads
+class MultiHeadedAttention(nn.Module):
+    def __init__(self, num_heads, d_model, dropout=0.1):
+        "Take in model size and number of heads."
+        super(MultiHeadedAttention, self).__init__()
+        assert d_model % num_heads == 0
+        # We assume d_v always equals d_k
+        self.d_k = d_model // num_heads
+        self.num_heads = num_heads
 
-#         self.wq = nn.Linear(d_model, d_model)
-#         self.wk = nn.Linear(d_model, d_model)
-#         self.wv = nn.Linear(d_model, d_model)
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
 
-#         self.dense = nn.Linear(d_model, d_model)
+        self.dense = nn.Linear(d_model, d_model)
 
-#         # self.linears = clones(nn.Linear(d_model, d_model), 4)
-#         self.attn = None
-#         self.dropout = nn.Dropout(p=dropout)
+        # self.linears = clones(nn.Linear(d_model, d_model), 4)
+        self.attn = None
+        self.dropout = nn.Dropout(p=dropout)
 
-#         self.mask_model = MaskPerturbation(d_model)
-#         self.calibration = AttentionCalibration(d_model)    
+    def forward(self, query, key, value, mask=None):
+        "Implements Figure 2"
+        if mask is not None:
+            # Same mask applied to all h heads.
+            mask = mask.unsqueeze(1)
+        nbatches = query.size(0)
 
-#     def forward(self, query, key, value, mask=None):
-#         "Implements Figure 2"
-#         if mask is not None:
-#             # Same mask applied to all h heads.
-#             mask = mask.unsqueeze(1)
-#         nbatches = query.size(0)
+        # 1) Do all the linear projections in batch from d_model => h x d_k
+        query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
+        query = query.transpose(1, 2)
 
-#         # 1) Do all the linear projections in batch from d_model => h x d_k
-#         query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
-#         query = query.transpose(1, 2)
+        key = self.wk(key).view(nbatches, -1, self.num_heads, self.d_k)
+        key = key.transpose(1, 2)
 
-#         key = self.wk(key).view(nbatches, -1, self.num_heads, self.d_k)
-#         key = key.transpose(1, 2)
+        value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
+        value = value.transpose(1, 2)
 
-#         value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
-#         value = value.transpose(1, 2)
+        #        query, key, value = \
+        #            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        #             for l, x in zip(self.linears, (query, key, value))]
 
-#         #        query, key, value = \
-#         #            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-#         #             for l, x in zip(self.linears, (query, key, value))]
+        # 2) Apply attention on all the projected vectors in batch.
+        x, attn = self.attention(query, key, value, mask=mask)
 
-#         # 2) Apply attention on all the projected vectors in batch.
-#         x, attn = self.attention(query, key, value, mask=mask)
+        # 3) "Concat" using a view and apply a final linear.
+        x = x.transpose(1, 2).contiguous() \
+            .view(nbatches, -1, self.num_heads * self.d_k)
 
-#         mask = self.mask_model(query, key)
+        x = self.dense(x)
+        x = self.dropout(x)
 
-#         # calibration
-#         attn_cal = calibrate_attention(attn, mask)
+        return x
 
-#         # combine
-#         attn_final = self.calibration(query, attn, attn_cal)
-
-#         # 3) "Concat" using a view and apply a final linear.
-#         x = x.transpose(1, 2).contiguous() \
-#             .view(nbatches, -1, self.num_heads * self.d_k)
-
-#         x = self.dense(x)
-#         x = self.dropout(x)
-
-#         return x
-
-#     def attention(self, query, key, value, mask=None):
-#         """Compute 'Scaled Dot Product Attention'"""
-#         d_k = query.size(-1)
-#         scores = torch.matmul(query, key.transpose(-2, -1)) \
-#                  / math.sqrt(d_k)
-#         # print(mask.shape)
-#         if mask is not None:
-#             # 根据mask，指定位置填充 -1e9
-#             scores += (mask * -1e9)
-#             # attention weights
-#         p_attn = F.softmax(scores, dim=-1)
-#         return torch.matmul(p_attn, value), p_attn
+    def attention(self, query, key, value, mask=None):
+        """Compute 'Scaled Dot Product Attention'"""
+        d_k = query.size(-1)
+        scores = torch.matmul(query, key.transpose(-2, -1)) \
+                 / math.sqrt(d_k)
+        # print(mask.shape)
+        if mask is not None:
+            # 根据mask，指定位置填充 -1e9
+            scores += (mask * -1e9)
+            # attention weights
+        p_attn = F.softmax(scores, dim=-1)
+        return torch.matmul(p_attn, value), p_attn
     
 class PositionwiseFeedForward(nn.Module):
     "Implements FFN equation."
@@ -295,7 +283,7 @@ class EncoderLayer(nn.Module):
 
         # Multi-head attention for processing input sequence
         # Input/Output: [batch_size, seq_len, d_model]
-        self.mha = CalibratedMultiHeadAttention(num_heads, d_model)
+        self.mha = MultiHeadedAttention(num_heads, d_model)
 
         # Position-wise feed-forward network
         # Input/Output: [batch_size, seq_len, d_model]
@@ -329,7 +317,7 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, d_model, num_heads, dff, dropout):
         super(DecoderLayer, self).__init__()
-        self.self_mha = CalibratedMultiHeadAttention(num_heads, d_model,
+        self.self_mha = MultiHeadedAttention(num_heads, d_model,
                                              dropout=0.1)  # Masked self-attention
         self.src_mha = CalibratedMultiHeadAttention(num_heads, d_model,
                                             dropout=0.1)  # Encoder-decoder attention
@@ -340,7 +328,7 @@ class DecoderLayer(nn.Module):
         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
     
-    def forward(self, x, memory, look_ahead_mask, trg_padding_mask):
+    def forward(self, x, memory, look_ahead_mask, trg_padding_mask, use_perturb=False):
         """Follow Figure 1 (right) for connections."""
         """
         Inputs:
@@ -360,7 +348,7 @@ class DecoderLayer(nn.Module):
 
         # 2. Cross-attention (decoder attends to encoder output)
         src_output = self.src_mha(x, memory, memory,
-                                  trg_padding_mask)  # Q=x, K=V=memory
+                                  trg_padding_mask, use_perturb=use_perturb )  # Q=x, K=V=memory
         x = self.layernorm2(x + src_output)
 
         # 3. Feedforward network
@@ -422,7 +410,7 @@ class Decoder(nn.Module):
             [DecoderLayer(d_model, num_heads, dff, dropout)
              for _ in range(num_layers)])  # Stack of decoder layers
         
-    def forward(self, x, memory, look_ahead_mask, trg_padding_mask):
+    def forward(self, x, memory, look_ahead_mask, trg_padding_mask, use_perturb=False):
         """
         Inputs:
             x: [batch_size, tgt_seq_len] - Target tokens
@@ -437,7 +425,7 @@ class Decoder(nn.Module):
 
         # Pass through each decoder layer
         for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
 
         return x  # Final decoder output
     

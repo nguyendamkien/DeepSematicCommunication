@@ -511,15 +511,31 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
     dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-                               src_mask)
+                               src_mask, use_perturb=False)
     pred = model.dense(dec_output)
     ntokens = pred.size(-1)
 
     # calculate loss
-    loss = loss_function(pred.contiguous().view(-1, ntokens),
-                         trg_real.contiguous().view(-1), pad, criterion)
+    # loss_semantic = loss_function(pred.contiguous().view(-1, ntokens),
+    #                      trg_real.contiguous().view(-1), pad, criterion)
     
+    # out_perturb = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+    #                            src_mask, use_perturb=True)
+    
+    # out_perturb = model.dense(out_perturb)
+
+    # loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
+    #                      trg_real.contiguous().view(-1), pad, criterion)
+        
+    # # ===== Combine =====
+    # alpha = 0.1  # tuning
+
+    # loss = loss_semantic + alpha * loss_perturb
+
     # backprop + update
+    loss = loss_function(pred.contiguous().view(-1, ntokens),
+                        trg_real.contiguous().view(-1), pad, criterion)
+
     loss.backward()
     opt.step()
 
@@ -576,11 +592,28 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
 
         channel_dec_output = model.channel_decoder(Rx_sig)
         dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-                                   src_mask)
+                                   src_mask, use_perturb=False)
         pred = model.dense(dec_output)
         ntokens = pred.size(-1)
+
+        # calculate loss
         loss = loss_function(pred.contiguous().view(-1, ntokens),
-                             trg_real.contiguous().view(-1), pad, criterion)
+                            trg_real.contiguous().view(-1), pad, criterion)
+        
+        # out_perturb = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+        #                         src_mask, use_perturb=True)
+        
+        # out_perturb = model.dense(out_perturb)
+
+        # loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
+        #                     trg_real.contiguous().view(-1), pad, criterion)
+            
+        # # ===== Combine =====
+        # alpha = 0.1  # tuning
+
+        # loss = loss_semantic - alpha * loss_perturb
+        # # loss = loss_function(pred.contiguous().view(-1, ntokens),
+        # #                      trg_real.contiguous().view(-1), pad, criterion)
 
     return loss.item(), snr
 
