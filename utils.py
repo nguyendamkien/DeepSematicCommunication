@@ -22,7 +22,7 @@ from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from torchvision.models import RegNet_X_8GF_Weights
 from w3lib.html import remove_tags
 
-# from models.mutual_info import sample_batch, mutual_information
+from models.mutual_info import sample_batch, mutual_information
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 nltk.download('punkt_tab')
@@ -448,7 +448,7 @@ class Channels():
 
         return Rx_sig_equalized, batch_snr_db
     
-def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
+def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
@@ -513,11 +513,54 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
     loss = loss_function(pred.contiguous().view(-1, ntokens),
                          trg_real.contiguous().view(-1), pad, criterion)
     
+    # Optional mutual information loss
+    if mi_net is not None:
+        mi_net.eval()
+        joint, marginal = sample_batch(Tx_sig, Rx_sig)
+        mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
+        loss_mine = -mi_lb
+        loss = loss + 0.0009 * loss_mine
+
     # backprop + update
     loss.backward()
     opt.step()
 
     return loss.item(), snr
+
+def train_mi(model, mi_net, src, n_var, padding_idx, opt, channel, iteration=0):
+    mi_net.train()
+    opt.zero_grad()
+
+    channels = Channels()
+    src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor).to(
+        device)
+    enc_output = model.encoder(src, src_mask)
+    channel_enc_output = model.channel_encoder(enc_output)
+
+    Tx_sig = power_normalize(channel_enc_output)
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    else:
+        raise ValueError(
+            "Please choose from AWGN, Rayleigh, Rician, or TimeVaryingRician")
+    
+    joint, marginal = sample_batch(Tx_sig, Rx_sig)
+    mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
+    mi_bits = mi_lb / torch.log(torch.tensor(2.0))
+    loss_mine = -mi_lb
+
+    loss_mine.backward()
+    torch.nn.utils.clip_grad_norm_(mi_net.parameters(), 10.0)
+    opt.step()
+
+    return loss_mine.item(), mi_bits.item()
+
 
 def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     model.eval()

@@ -14,10 +14,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import EurDataset, collate_data
-# from models.mutual_info import Mine
+from models.mutual_info import Mine
 from models.transceiver import DeepSC
 from utils import SNR_to_noise, train_step, val_step, initNetParams, \
-    SeqtoText, list_checkpoints, load_checkpoint
+    SeqtoText, list_checkpoints, load_checkpoint, train_mi
 
 plt.ion() # Turn on interactive mode
 
@@ -89,25 +89,25 @@ def train(epoch, args, net, mi_net=None):
         # For original Channel
         noise_std = float(
             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
-        # if mi_net is not None:
-        #     mi_loss, mi_bits = train_mi(net, mi_net, sents, 0.1, pad_idx,
-        #                                 mi_opt, args.channel)
-        #     loss_total, snr = train_step(net, sents, sents, 0.1, pad_idx,
-        #                                  optimizer, criterion, args.channel,
-        #                                  mi_net)
-        #     epoch_loss += loss_total
-        #     mi_bits_total += mi_bits
-        #     batch_count += 1
-        #     snr_values.append(snr)
-        #     pbar.set_description(
-        #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
-        # else:
-        loss_total, snr = train_step(net, sents, sents, noise_std, pad_idx,
-                                     optimizer, criterion, args.channel)
-        epoch_loss += loss_total
-        snr_values.append(snr)
-        pbar.set_description(
-            f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
+        if mi_net is not None:
+            mi_loss, mi_bits = train_mi(net, mi_net, sents, 0.1, pad_idx,
+                                        mi_opt, args.channel)
+            loss_total, snr = train_step(net, sents, sents, 0.1, pad_idx,
+                                         optimizer, criterion, args.channel,
+                                         mi_net)
+            epoch_loss += loss_total
+            mi_bits_total += mi_bits
+            batch_count += 1
+            snr_values.append(snr)
+            pbar.set_description(
+                f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
+        else:
+            loss_total, snr = train_step(net, sents, sents, noise_std, pad_idx,
+                                        optimizer, criterion, args.channel)
+            epoch_loss += loss_total
+            snr_values.append(snr)
+            pbar.set_description(
+                f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
 
     snr_min = min(snr_values) if snr_values else 0
     snr_max = max(snr_values) if snr_values else 0
@@ -215,11 +215,11 @@ if __name__ == '__main__':
     
     deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
-    # mi_net = Mine().to(device)
+    mi_net = Mine().to(device)
     criterion = nn.CrossEntropyLoss(reduction='none')
     optimizer = torch.optim.Adam(deepsc.parameters(), lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
-    # mi_opt = torch.optim.Adam(mi_net.parameters(), lr=0.001)
+    mi_opt = torch.optim.Adam(mi_net.parameters(), lr=0.001)
 
     initNetParams(deepsc)
 
@@ -242,9 +242,9 @@ if __name__ == '__main__':
         if checkpoint and checkpoint['epoch'] < args.epochs:
             start_epoch = checkpoint['epoch']
             deepsc.load_state_dict(checkpoint['model_state_dict'])
-            # mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
+            mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            # mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
+            mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
             print(
                 f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
         else:
@@ -265,7 +265,7 @@ if __name__ == '__main__':
         start = time.time()
         # Training
         interrupted, epoch_train_loss, avg_mi_bits, snr_min, snr_max, snr_avg = train(
-            epoch, args, deepsc)
+            epoch, args, deepsc, mi_net)
         if interrupted:
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")
