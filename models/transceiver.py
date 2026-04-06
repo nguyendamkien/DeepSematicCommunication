@@ -152,7 +152,7 @@ class CalibratedMultiHeadAttention(nn.Module):
 
         out = self.dropout(out)
 
-        return out
+        return out, mask_perturbation
     
     def attention(self, query, key, value, mask=None):
         """Compute 'Scaled Dot Product Attention'"""
@@ -161,7 +161,7 @@ class CalibratedMultiHeadAttention(nn.Module):
                  / math.sqrt(d_k)
         # print(mask.shape)
         if mask is not None:
-            scores += (mask * -1e9)
+            scores = scores + (mask * -1e9)
         p_attn = F.softmax(scores, dim=-1)
         return torch.matmul(p_attn, value), p_attn
     
@@ -336,7 +336,7 @@ class DecoderLayer(nn.Module):
             memory: [batch_size, src_seq_len, d_model] - Channel Decoder output
             look_ahead_mask: [batch_size, tgt_seq_len, tgt_seq_len] - Causal mask
             trg_padding_mask: [batch_size, tgt_seq_len, src_seq_len] - Cross-attention mask
-        Output: [batch_size, tgt_seq_len, d_model]
+        Output: ([batch_size, tgt_seq_len, d_model], mask_perturbation)
         """
         # m = memory
 
@@ -347,7 +347,7 @@ class DecoderLayer(nn.Module):
             x + attn_output)  # Residual connection + normalization
 
         # 2. Cross-attention (decoder attends to encoder output)
-        src_output = self.src_mha(x, memory, memory,
+        src_output, m_t = self.src_mha(x, memory, memory,
                                   trg_padding_mask, use_perturb=use_perturb )  # Q=x, K=V=memory
         x = self.layernorm2(x + src_output)
 
@@ -355,7 +355,7 @@ class DecoderLayer(nn.Module):
         fnn_output = self.ffn(x)
         x = self.layernorm3(x + fnn_output)
 
-        return x
+        return x, m_t
     
 class Encoder(nn.Module):
     """Core encoder is a stack of N layers"""
@@ -417,17 +417,18 @@ class Decoder(nn.Module):
             memory: [batch_size, src_seq_len, d_model] - Encoder output
             look_ahead_mask: [batch_size, tgt_seq_len, tgt_seq_len]
             trg_padding_mask: [batch_size, tgt_seq_len, src_seq_len]
-        Output: [batch_size, tgt_seq_len, d_model]
+        Output: ([batch_size, tgt_seq_len, d_model], mask_perturbation)
         """
         # Convert token indices to embeddings
         x = self.embedding(x) * math.sqrt(self.d_model)  # Scale embedding
         x = self.pos_encoding(x)  # Add positional encoding
 
         # Pass through each decoder layer
+        m_t = None
         for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
+            x, m_t = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
 
-        return x  # Final decoder output
+        return x, m_t  # Final decoder output and mask perturbation
     
 class ChannelDecoder(nn.Module):
     """Channel decoder for converting channel-coded features back to semantic space
