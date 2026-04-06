@@ -16,7 +16,7 @@ from tqdm import tqdm
 from dataset import EurDataset, collate_data
 # from models.mutual_info import Mine
 from models.transceiver import DeepSC
-from utils import SNR_to_noise, train_step, val_step, initNetParams, \
+from utils import SNR_to_noise, train_step, train_mask, val_step, initNetParams, \
     SeqtoText, list_checkpoints, load_checkpoint
 
 plt.ion() # Turn on interactive mode
@@ -75,12 +75,13 @@ def train(epoch, args, net, mi_net=None):
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
     epoch_loss = 0
     mi_bits_total = 0
+    mask_loss = 0
     batch_count = 0
     snr_values = []
 
     for sents in pbar:
         if stop_training:
-            return True, epoch_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
+            return True, epoch_loss, mi_bits_total / batch_count if batch_count > 0 else 0, CE_loss, mask_loss, min(
                 snr_values) if snr_values else 0, max(
                 snr_values) if snr_values else 0, sum(snr_values) / len(
                 snr_values) if snr_values else 0
@@ -103,11 +104,15 @@ def train(epoch, args, net, mi_net=None):
         #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
         # else:
         loss_total, snr = train_step(net, sents, sents, noise_std, pad_idx,
-                                     optimizer, criterion, args.channel)
+                                     optimizer_deepsc, criterion, args.channel)
+        loss_mask, snr = train_mask(net, sents, sents, noise_std, pad_idx, optimizer_mask, criterion, args.channel)
         epoch_loss += loss_total
+        mask_loss += loss_mask
+        batch_count += 1
         snr_values.append(snr)
+        avg_mask_loss = mask_loss / batch_count
         pbar.set_description(
-            f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
+            f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; Loss_mask: {avg_mask_loss:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
 
     snr_min = min(snr_values) if snr_values else 0
     snr_max = max(snr_values) if snr_values else 0
@@ -115,7 +120,8 @@ def train(epoch, args, net, mi_net=None):
 
     avg_epoch_loss = epoch_loss / len(train_iterator)
     avg_mi_bits = mi_bits_total / batch_count if batch_count > 0 else 0
-    return False, avg_epoch_loss, avg_mi_bits, snr_min, snr_max, snr_avg
+    avg_mask_loss = mask_loss / len(train_iterator)
+    return False, avg_epoch_loss, avg_mi_bits, avg_mask_loss, snr_min, snr_max, snr_avg
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
@@ -161,7 +167,8 @@ def validate(epoch, args, net, seq_to_text):
 
 # Function to save checkpoint for each epoch
 def save_checkpoint(epoch, avg_loss, epoch_train_loss,
-                    avg_mi_bits, snr_min, snr_max, snr_avg):
+                    avg_mi_bits, mask_train_loss,
+                    snr_min, snr_max, snr_avg):
     checkpoint_path = os.path.join(
         args.checkpoint_path,
         f'checkpoint_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.pth'
@@ -172,10 +179,12 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss,
         'epoch': epoch + 1,
         'model_state_dict': deepsc.state_dict(),
         # 'mi_net_state_dict': mi_net.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        'optimizer_deepsc_state_dict': optimizer_deepsc.state_dict(),
+        'optimizer_mask_state_dict': optimizer_mask.state_dict(),
         # 'mi_opt_state_dict': mi_opt.state_dict(),
         'loss': avg_loss,
         'train_loss': epoch_train_loss,
+        'mask_train_loss': mask_train_loss,
         'mi_bits': avg_mi_bits,
         'snr_min': snr_min,
         'snr_max': snr_max,
@@ -217,7 +226,20 @@ if __name__ == '__main__':
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
     # mi_net = Mine().to(device)
     criterion = nn.CrossEntropyLoss(reduction='none')
-    optimizer = torch.optim.Adam(deepsc.parameters(), lr=1e-4,
+    
+    # Collect mask parameters
+    mask_params = []
+    for layer in deepsc.decoder.dec_layers:
+        mask_params.extend(list(layer.src_mha.mask_perturbation_model.parameters()))
+        mask_params.extend(list(layer.src_mha.calibration.parameters()))
+    
+    # Parameters for DeepSC excluding mask
+    mask_param_ids = set(id(p) for p in mask_params)
+    deepsc_params = [p for p in deepsc.parameters() if id(p) not in mask_param_ids]
+    
+    optimizer_deepsc = torch.optim.Adam(deepsc_params, lr=1e-4,
+                                 betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
+    optimizer_mask = torch.optim.Adam(mask_params, lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
     # mi_opt = torch.optim.Adam(mi_net.parameters(), lr=0.001)
 
@@ -243,7 +265,8 @@ if __name__ == '__main__':
             start_epoch = checkpoint['epoch']
             deepsc.load_state_dict(checkpoint['model_state_dict'])
             # mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            optimizer_deepsc.load_state_dict(checkpoint['optimizer_deepsc_state_dict'])
+            optimizer_mask.load_state_dict(checkpoint['optimizer_mask_state_dict'])
             # mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
             print(
                 f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
@@ -264,19 +287,20 @@ if __name__ == '__main__':
     for epoch in range(start_epoch, args.epochs):
         start = time.time()
         # Training
-        interrupted, epoch_train_loss, avg_mi_bits, snr_min, snr_max, snr_avg = train(
+        interrupted, epoch_train_loss, avg_mi_bits, mask_train_loss, snr_min, snr_max, snr_avg = train(
             epoch, args, deepsc)
         if interrupted:
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")
             avg_loss = validate(epoch, args, deepsc, seq_to_text)
             save_checkpoint(epoch, avg_loss, epoch_train_loss,
-                avg_mi_bits, snr_min, snr_max, snr_avg)
+                avg_mi_bits, mask_train_loss,
+                snr_min, snr_max, snr_avg)
             break
 
         avg_loss = validate(epoch, args, deepsc, seq_to_text)
         save_checkpoint(epoch, avg_loss, epoch_train_loss,
-                avg_mi_bits, snr_min, snr_max, snr_avg)
+                avg_mi_bits, mask_train_loss, snr_min, snr_max, snr_avg)
         
         print(f"GPU Utilization: {torch.cuda.utilization(0)}%")
         print(

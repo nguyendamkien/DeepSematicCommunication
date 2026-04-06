@@ -454,7 +454,7 @@ class Channels():
 
         return Rx_sig_equalized, batch_snr_db
     
-def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
+def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
@@ -473,8 +473,15 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
             snr_db=random.uniform(0, 20),  # Random SNR for robustness
         )
 
+    # ===== freeze mask =====
+    for name, p in model.named_parameters():
+        if "mask_perturbation_model" in name or "calibration" in name:
+            p.requires_grad = False
+        else:
+            p.requires_grad = True
+
     # remove former gradient
-    opt.zero_grad()
+    opt_deepsc.zero_grad()
 
     # mask for transformer
     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
@@ -510,36 +517,101 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
-    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+    dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
                                src_mask, use_perturb=False)
     pred = model.dense(dec_output)
     ntokens = pred.size(-1)
 
-    # calculate loss
-    # loss_semantic = loss_function(pred.contiguous().view(-1, ntokens),
-    #                      trg_real.contiguous().view(-1), pad, criterion)
-    
-    # out_perturb = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-    #                            src_mask, use_perturb=True)
-    
-    # out_perturb = model.dense(out_perturb)
-
-    # loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
-    #                      trg_real.contiguous().view(-1), pad, criterion)
-        
-    # # ===== Combine =====
-    # alpha = 0.1  # tuning
-
-    # loss = loss_semantic + alpha * loss_perturb
-
-    # backprop + update
+    #calculate loss
     loss = loss_function(pred.contiguous().view(-1, ntokens),
-                        trg_real.contiguous().view(-1), pad, criterion)
-
-    loss.backward()
-    opt.step()
+                         trg_real.contiguous().view(-1), pad, criterion)
+    
+    loss.backward(retain_graph=True)
+    opt_deepsc.step()
 
     return loss.item(), snr
+
+def train_mask(model, src, trg, n_var, pad, opt_mask, criterion, channel):
+    model.train()
+    trg_inp = trg[:, :-1]
+    trg_real = trg[:, 1:]
+    channels = Channels()
+
+    if channel == '3GPP':
+        # Random distance for diversity
+        distance = random.uniform(10, 2000)
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5,
+            tx_power_dB=23,
+            seed=None,
+            snr_db=random.uniform(0, 20),  # Random SNR for robustness
+        )
+
+    # ===== freeze DeepSC, chỉ train mask =====
+    for name, p in model.named_parameters():
+        if "mask_perturbation_model" in name or "calibration" in name:
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
+
+    # remove former gradient
+    opt_mask.zero_grad()
+
+    # mask for transformer
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+    # encoder + channel encoder
+    enc_output = model.encoder(src, src_mask)
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # Channel transmission
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+        # Log for debugging
+        # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
+        #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
+
+    # channel decoder + decoder
+    channel_dec_output = model.channel_decoder(Rx_sig)
+    
+    out_perturb, m_t = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                               src_mask, use_perturb=True)
+    
+    out_perturb = model.dense(out_perturb)
+
+    loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
+                            trg_real.contiguous().view(-1), pad, criterion)
+        
+    L_c = (m_t * (1 - m_t)).mean()
+
+    loss_mask = -loss_perturb + 0.01 * L_c
+
+    # ===== Tối ưu riêng cho mask =====
+    loss_mask.backward()
+    opt_mask.step()
+
+    return loss_mask.item(), snr
 
 def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     model.eval()
@@ -591,7 +663,7 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
             #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
         channel_dec_output = model.channel_decoder(Rx_sig)
-        dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+        dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
                                    src_mask, use_perturb=False)
         pred = model.dense(dec_output)
         ntokens = pred.size(-1)
@@ -599,21 +671,6 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
         # calculate loss
         loss = loss_function(pred.contiguous().view(-1, ntokens),
                             trg_real.contiguous().view(-1), pad, criterion)
-        
-        # out_perturb = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-        #                         src_mask, use_perturb=True)
-        
-        # out_perturb = model.dense(out_perturb)
-
-        # loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
-        #                     trg_real.contiguous().view(-1), pad, criterion)
-            
-        # # ===== Combine =====
-        # alpha = 0.1  # tuning
-
-        # loss = loss_semantic - alpha * loss_perturb
-        # # loss = loss_function(pred.contiguous().view(-1, ntokens),
-        # #                      trg_real.contiguous().view(-1), pad, criterion)
 
     return loss.item(), snr
 
@@ -707,7 +764,7 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
             torch.FloatTensor).to(device)
         combined_mask = torch.max(trg_mask, look_ahead_mask)
         # Generate next token
-        dec_output = model.decoder(outputs, memory, combined_mask, src_mask)
+        dec_output, _ = model.decoder(outputs, memory, combined_mask, src_mask)
         pred = model.dense(dec_output)
         # Select most probable token for next position
         prob = pred[:, -1:, :]  # (batch_size, 1, vocab_size)
@@ -894,7 +951,7 @@ def debug_greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         look_ahead_mask = subsequent_mask(outputs.size(1)).float()
         combined_mask = torch.max(trg_mask.to(device),
                                   look_ahead_mask.to(device))
-        dec_output = model.decoder(outputs, memory, combined_mask, None)
+        dec_output, _ = model.decoder(outputs, memory, combined_mask, None)
         pred = model.dense(dec_output)
         _, next_word = torch.max(pred[:, -1:, :], dim=-1)
         outputs = torch.cat([outputs, next_word.to(device)], dim=1)
@@ -1130,7 +1187,7 @@ def train_step_mask(model, src, trg, n_var, pad, opt, criterion, channel):
     channel_dec_output = model.channel_decoder(Rx_sig)
 
     # ===== decoder =====
-    dec_output, dec_attn, dec_attn_p, dec_mask = model.decoder(
+    dec_output, _ = model.decoder(
         trg_inp, channel_dec_output, look_ahead_mask, src_mask
     )
 
@@ -1138,7 +1195,7 @@ def train_step_mask(model, src, trg, n_var, pad, opt, criterion, channel):
     ntokens = pred.size(-1)
 
     # ===== 1. semantic loss =====
-    loss_semantic = loss_function(
+    loss_cross_entropy = loss_function(
         pred.contiguous().view(-1, ntokens),
         trg_real.contiguous().view(-1),
         pad,
@@ -1146,9 +1203,9 @@ def train_step_mask(model, src, trg, n_var, pad, opt, criterion, channel):
     )
 
     # ===== 2. collect all attn + mask =====
-    attn_list = enc_attn + dec_attn
-    attn_p_list = enc_attn_p + dec_attn_p
-    mask_list = enc_mask + dec_mask
+    attn_list = enc_attn
+    attn_p_list = enc_attn_p
+    mask_list = enc_mask
 
     # ===== 3. sparsity loss =====
     alpha = 0.01
@@ -1173,7 +1230,7 @@ def train_step_mask(model, src, trg, n_var, pad, opt, criterion, channel):
             loss_attn += torch.mean((attn - attn_p) ** 2)
 
     # ===== 5. total loss =====
-    loss = loss_semantic + alpha * loss_sparse + beta * loss_attn
+    loss = loss_cross_entropy + alpha * loss_sparse + beta * loss_attn
 
     # ===== backward =====
     loss.backward()
@@ -1235,7 +1292,7 @@ def val_step_mask(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     channel_dec_output = model.channel_decoder(Rx_sig)
 
     # ===== decoder =====
-    dec_output, dec_attn, dec_attn_p, dec_mask = model.decoder(
+    dec_output, _ = model.decoder(
         trg_inp, channel_dec_output, look_ahead_mask, src_mask
     )
 
@@ -1243,7 +1300,7 @@ def val_step_mask(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     ntokens = pred.size(-1)
 
     # ===== 1. semantic loss =====
-    loss_semantic = loss_function(
+    loss_cross_entropy = loss_function(
         pred.contiguous().view(-1, ntokens),
         trg_real.contiguous().view(-1),
         pad,
@@ -1251,9 +1308,9 @@ def val_step_mask(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     )
 
     # ===== 2. collect all attn + mask =====
-    attn_list = enc_attn + dec_attn
-    attn_p_list = enc_attn_p + dec_attn_p
-    mask_list = enc_mask + dec_mask
+    attn_list = enc_attn
+    attn_p_list = enc_attn_p
+    mask_list = enc_mask
 
     # ===== 3. sparsity loss =====
     alpha = 0.01
@@ -1278,6 +1335,6 @@ def val_step_mask(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
             loss_attn += torch.mean((attn - attn_p) ** 2)
 
     # ===== 5. total loss =====
-    loss = loss_semantic + alpha * loss_sparse + beta * loss_attn
+    loss = loss_cross_entropy + alpha * loss_sparse + beta * loss_attn
 
     return loss.item(), snr

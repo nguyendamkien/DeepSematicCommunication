@@ -29,7 +29,7 @@ parser.add_argument('--vocab-file', default='vocab.json', type=str)
 #                     type=str)
 # parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='./kaggle/working/checkpoints/deepsc-AWGN',
+                    default='./kaggle/working/checkpoints/mask-deepsc-AWGN',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
