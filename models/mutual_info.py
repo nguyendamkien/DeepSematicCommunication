@@ -34,7 +34,7 @@ class Mine(nn.Module):
         x = F.relu(x)  # ReLU activation after first layer
         x = self.dense2(x)
         x = F.relu(x)  # ReLU activation after second layer
-        output = self.dense3(x)  # Final score output
+        output = F.relu(self.dense3(x))  # Final score output
 
         return output
     
