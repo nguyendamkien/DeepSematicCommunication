@@ -74,24 +74,45 @@ def calibrate_attention_weight(attn, mask):
 
     attn_cal = attn * torch.exp(1 - mask)
 
+    # Re-normalize để tổng = 1 trên dimension cuối
+    attn_cal = attn_cal / (attn_cal.sum(dim=-1, keepdim=True) + 1e-9)
+
     return attn_cal
 
 class AttentionCalibration(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model, num_heads):
         super().__init__()
-        self.gate = nn.Linear(d_model, 1)
+        self.num_heads = num_heads
+        # Wg and bg are layer-level trainable parameters (vary among layers).
+        # Output dim = num_heads so each head gets its own scalar gate.
+        self.gate = nn.Linear(d_model, num_heads)
 
     def forward(self, Q, attn, attn_cal):
         """
-        Q: (batch, seq_len, d_model)
-        attn, attn_cal: (batch, heads, seq_len, seq_len)
-        """
-        g = torch.sigmoid(self.gate(Q))  # (batch, seq_len, 1)
-        g = g.unsqueeze(1)  # expand for heads
+        Implements:
+            g_t  = σ(q_t · Wg + bg)          [per query position, per head]
+            a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
 
+        Args:
+            Q       : (batch, seq_len, d_model)          – query (pre-split)
+            attn    : (batch, heads, seq_len, seq_len)   – original attention
+            attn_cal: (batch, heads, seq_len, seq_len)   – calibrated attention
+        Returns:
+            attn_comb: (batch, heads, seq_len, seq_len)  – combined attention (post-softmax)
+        """
+        # g_t = σ(Q · Wg + bg)
+        # Q: (batch, seq_len, d_model)
+        # gate output: (batch, seq_len, num_heads)
+        g = torch.sigmoid(self.gate(Q))
+
+        # Reshape to (batch, num_heads, seq_len, 1) so it broadcasts over
+        # the key-dimension of attn: (batch, heads, seq_len, seq_len)
+        g = g.permute(0, 2, 1).unsqueeze(-1)  # (batch, heads, seq_len, 1)
+
+        # a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
         attn_comb = g * attn + (1 - g) * attn_cal
 
-        return F.softmax(attn_comb, dim=-1)
+        return attn_comb
     
 class CalibratedMultiHeadAttention(nn.Module):
     def __init__(self, num_heads, d_model, dropout=0.1):
@@ -108,7 +129,7 @@ class CalibratedMultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         self.mask_perturbation_model = MaskPerturbation(d_model)
-        self.calibration = AttentionCalibration(d_model)
+        self.calibration = AttentionCalibration(d_model, num_heads)
 
     def forward(self, query, key, value, mask=None, use_perturb=False):
         if mask is not None:
@@ -139,7 +160,7 @@ class CalibratedMultiHeadAttention(nn.Module):
             # dùng attention bị phá
             attn_final = perturb_attention_weight(attn, mask_perturbation)
         else:
-            # calibration
+            # calibration: a_comb = g*a_t + (1-g)*a_c  (raw, chưa softmax)
             attn_cal = calibrate_attention_weight(attn, mask_perturbation)
             attn_final = self.calibration(query_origin, attn, attn_cal)
 
