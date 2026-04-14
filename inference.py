@@ -54,7 +54,7 @@ def inference(args, snr, net):
     test_eur = EurDataset('test')
     test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
                                num_workers=0,
-                               pin_memory=True, collate_fn=collate_data)
+                               pin_memory=True, collate_fn=collate_pair_data)
     
     # Initialize sequence-to-text converter using vocabulary
     StoT = SeqtoText(token_to_idx, end_idx)
@@ -139,7 +139,7 @@ def sample_dataset_sentences(dataset: EurDataset, num_samples: int,
         batch_size=batch_size,
         num_workers=0,
         pin_memory=True,
-        collate_fn=collate_data  # Ensures padding is applied
+        collate_fn=collate_pair_data  # Ensures padding is applied
     )
 
 

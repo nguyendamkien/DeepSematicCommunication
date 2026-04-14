@@ -26,8 +26,8 @@ from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
 
 # Argument parser setup
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data.pkl', type=str)
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)

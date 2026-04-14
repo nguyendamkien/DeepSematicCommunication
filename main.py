@@ -23,7 +23,7 @@ plt.ion() # Turn on interactive mode
 
 # Argument parser for configuring hyperparameters and paths
 parser = argparse.ArgumentParser()
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 parser.add_argument('--checkpoint-path',
                     default='/kaggle/working/checkpoints/deepsc-AWGN',
                     type=str)

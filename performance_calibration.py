@@ -26,8 +26,8 @@ from utils import BleuScore, SNR_to_noise, greedy_decode_calibration, SeqtoText,
 
 # Argument parser setup
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data.pkl', type=str)
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)
@@ -142,7 +142,7 @@ def performance(args, SNR, net):
     bleu_score_1gram = BleuScore(1, 0, 0, 0)
 
     print("Loading test dataset...")
-    test_eur = EurDataset('noisy_test')
+    test_eur = EurDataset('test')
     StoT = SeqtoText(token_to_idx, end_idx)
 
     final_bleu = []

@@ -65,7 +65,7 @@ def predict(input_data: InputSentence):
         input_tokens = [start_idx] + [
             token_to_idx.get(word, token_to_idx["<UNK>"])
             for word in input_data.sentence.split()
-        ] + [4] + [end_idx]
+        ] + [end_idx]
         
         if len(input_tokens) > args.MAX_LENGTH + 2:
             raise HTTPException(status_code=400, detail=f"Sentence too long. Max length {args.MAX_LENGTH}")
@@ -87,7 +87,7 @@ def predict(input_data: InputSentence):
         for t in output_tokens:
                 if t == end_idx:  # token <END>
                     break          # dừng lấy token sau <END>
-                if t in (start_idx, 4):  # bỏ <START> và token 4
+                if t in (start_idx):  # bỏ <START>
                     continue
                 clean_tokens.append(t)
         output_text = StoT.sequence_to_text(clean_tokens)
