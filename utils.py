@@ -1034,51 +1034,7 @@ def plot_bleu_vs_snr(data_dict,
     plt.show()
     plt.close()
 
-def add_semantic_noise(src, vocab_size, prob=0.1, pad_idx=0):
-    noisy = src.clone()
-
-    batch_size, seq_len = src.size()
-    valid_tokens = list(range(5, vocab_size))
-
-    noise_types = ["substitute", "insert", "delete", "verb"]
-    probs = [0.4, 0.2, 0.2, 0.2]
-
-#    noise_map = [["none"] * seq_len for _ in range(batch_size)]
-
-    for i in range(batch_size):
-        for j in range(seq_len):
-
-            # bo 4 token dac biet
-            if src[i, j] <= 4: 
-                continue
-
-            if random.random() < prob:
-
-                noise_type = random.choices(noise_types, probs)[0]
-               # noise_map[i][j] = noise_type
-
-                if noise_type == "substitute":
-                    noisy[i, j] = random.choice(valid_tokens)
-
-                elif noise_type == "delete":
-                    noisy[i, j] = pad_idx
-
-                elif noise_type == "insert":
-                    if j < seq_len - 1 and src[i, j+1] != pad_idx:
-                        noisy[i, j+1] = noisy[i, j]
-                        noisy[i, j] = random.choice(valid_tokens)
-
-                elif noise_type == "verb":
-                    delta = random.randint(-10, 10)
-                    new_token = src[i, j] + delta
-                    if 4 <= new_token < vocab_size:
-                        noisy[i, j] = new_token
-                    else:
-                        noisy[i, j] = random.choice(valid_tokens)
-
-    return noisy
-
-def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel, bce_loss_fn, num_vocab):
+def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, channel, bce_loss_fn):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
@@ -1105,13 +1061,12 @@ def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel,
 
     # src_mask = src_mask.unsqueeze(1).unsqueeze(2) - kiem tra shape
 
-    # add semantic noise
-    noisy_src = add_semantic_noise(src, num_vocab)
-
-    true_error_label = ((src != noisy_src) & (src != pad)).float()
+    # ===== TRUE ERROR LABEL =====
+    # Use ground truth labels from dataset instead of computing from src/trg difference
+    true_error_label = labels.float()
 
     # encoder + channel encoder
-    enc_output, pred_error_prob = model.encoder(noisy_src, src_mask)
+    enc_output, pred_error_prob = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
     Tx_sig = power_normalize(channel_enc_output)
 
@@ -1150,21 +1105,24 @@ def train_step_calibration(model, src, trg, n_var, pad, opt, criterion, channel,
     loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
                          trg_real.contiguous().view(-1), pad, criterion)
     
-    # BCE loss
-    mask = (src != pad).float()
+    # BCE loss with proper masking for padding tokens
+    mask = (src != pad).float()  # [batch, seq_len]
+    
+    # Calculate BCE loss for each token (reduction='none')
+    bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
+    
+    # Apply mask and average over non-padding positions
+    loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-    loss_bce = (bce_loss_fn(pred_error_prob, true_error_label) * mask).sum() / mask.sum()
-    # loss_bce = bce_loss_fn(pred_error_prob, true_error_label.float())
-
-    loss = loss_ce + 1.0 * loss_bce
+    loss = loss_ce + 0.5 * loss_bce
     
     # backprop + update
     loss.backward()
     opt.step()
 
-    return loss.item(), snr
+    return loss.item(), loss_bce.item(), snr
 
-def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_loss_fn, num_vocab):
+def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel, bce_loss_fn):
     model.eval()
     with torch.no_grad():
         trg_inp = trg[:, :-1]
@@ -1186,10 +1144,9 @@ def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_lo
 
         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
 
-        noisy_src = add_semantic_noise(src, num_vocab)
-        true_error_label = ((src != noisy_src) & (src != pad)).float()
+        true_error_label = labels.float()
 
-        enc_output, pred_error_prob = model.encoder(noisy_src, src_mask)
+        enc_output, pred_error_prob = model.encoder(src, src_mask)
         channel_enc_output= model.channel_encoder(enc_output)
         Tx_sig = power_normalize(channel_enc_output)
 
@@ -1225,16 +1182,18 @@ def val_step_calibration(model, src, trg, n_var, pad, criterion, channel, bce_lo
         loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
                              trg_real.contiguous().view(-1), pad, criterion)
         
-        # BCE loss
-        mask = (trg_real != pad).float()
-
-        loss_bce = (bce_loss_fn(pred_error_prob, true_error_label) * mask).sum() / mask.sum()
+        # BCE loss with proper masking for padding tokens
+        mask = (src != pad).float()  # [batch, seq_len]
         
-        # loss_bce = bce_loss_fn(pred_error_prob, true_error_label.float())
+        # Calculate BCE loss for each token (reduction='none')
+        bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
+        
+        # Apply mask and average over non-padding positions
+        loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-        loss = loss_ce + 1.0 * loss_bce
+        loss = loss_ce + 0.5 * loss_bce
 
-    return loss.item(), snr
+    return loss.item(), loss_bce.item(), snr
 
 def greedy_decode_calibration(model, src, n_var, max_len, padding_idx, start_symbol,
                   channel, device):
