@@ -265,15 +265,17 @@ class Encoder(nn.Module):
 
         self.detector = DetectionNet(d_model)
 
-    def forward(self, x, src_mask):
+    def forward(self, x, src_mask, embed_input=None):
 
-        x = self.embedding(x) * math.sqrt(self.d_model)
-        
-        x = self.pos_encoding(x)
+        if embed_input is None:
+            x = self.embedding(x) * math.sqrt(self.d_model)
+            x = self.pos_encoding(x)
+        else:
+            x = embed_input
 
         C = None
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
 
             if C is None:
                 x = layer(x, None, src_mask)
@@ -284,9 +286,10 @@ class Encoder(nn.Module):
             # P = [batch, seq]
             # P_outer = [batch, seq, seq]
             # C = [batch, seq, seq]
-            P = self.detector(x) 
-            P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
-            C = 1 - P_outer
+            if i < len(self.layers) - 1:
+                P = self.detector(x) 
+                P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
+                C = 1 - P_outer
 
         return x, P
     
