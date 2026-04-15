@@ -274,7 +274,7 @@ def performance(args, SNR, net):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    SNR = [0, 3, 6, 9, 12, 15, 18]
+    SNR = [-9, -6, -3, 0, 3, 6, 9, 12, 15, 18]
     # SNR = [18]
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
     args.vocab_file = './data/' + args.vocab_file

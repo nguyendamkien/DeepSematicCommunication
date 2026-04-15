@@ -1035,7 +1035,27 @@ def plot_bleu_vs_snr(data_dict,
     plt.close()
 
 def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, channel, bce_loss_fn):
+    """
+    Adversarial training with FGM for semantic communication robustness.
+    
+    Based on paper Eq. (8-9):
+    min_ϕ,η,ζ,δ E_{(S,Ŝ)∈D}[max_{N_A∈N} L(X_embed + N_A, S, Ŝ; ϕ,η,ζ,δ)]
+    N_A = ε · ∇X_embed L / ||∇X_embed L||_2
+    
+    Args:
+        epsilon: perturbation scaling factor for FGM noise
+        lambda_adv: weight for adversarial loss combination (default 0.2)
+        lambda_bce: weight for BCE loss component (default 0.1)
+    """
+    epsilon=0.01
+    lambda_adv=0.2
+    lambda_bce=0.1
+    
     model.train()
+    
+    # Zero gradients at the beginning
+    opt.zero_grad()
+    
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
     channels = Channels()
@@ -1053,25 +1073,19 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
             snr_db=random.uniform(0, 20),  # Random SNR for robustness
         )
 
-    # remove former gradient
-    opt.zero_grad()
-
-    # mask for transformer
+    # Prepare masks for transformer attention
     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
 
     # src_mask = src_mask.unsqueeze(1).unsqueeze(2) - kiem tra shape
 
-    # ===== TRUE ERROR LABEL =====
-    # Use ground truth labels from dataset instead of computing from src/trg difference
-    true_error_label = labels.float()
-
-    # ===== 1. embedding =====
+    # ===== CLEAN EMBEDDING =====
+    # Get embedding with positional encoding
     x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
     x_embed = model.encoder.pos_encoding(x_embed)
-    x_embed.requires_grad_(True)
+    x_embed.requires_grad_(True)  # Enable gradient tracking for FGM
 
-    # ===== 2. forward CLEAN =====
-    # encoder + channel encoder
+    # ===== FORWARD PASS - CLEAN =====
+    # Encoder + Channel Encoder
     enc_output, pred_error_prob = model.encoder(src, src_mask, embed_input=x_embed)
     channel_enc_output = model.channel_encoder(enc_output)
     Tx_sig = power_normalize(channel_enc_output)
@@ -1100,93 +1114,97 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
         # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
         #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
-    # channel decoder + decoder
-    channel_dec_output = model.channel_decoder(Rx_sig)
-    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-                               src_mask)
-    pred = model.dense(dec_output)
-    ntokens = pred.size(-1)
-
-    # calculate loss
-    loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
-                         trg_real.contiguous().view(-1), pad, criterion)
-    
-    # BCE loss with proper masking for padding tokens
-    mask = (src != pad).float()  # [batch, seq_len]
-    
-    # Calculate BCE loss for each token (reduction='none')
-    bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
-    
-    # Apply mask and average over non-padding positions
-    loss_bce = (bce_scores * mask).sum() / mask.sum()
-
-    loss = loss_ce + 0.5 * loss_bce
-
-    # ===== ADVERSARIAL NOISE GENERATION (FGM) =====
-    # Compute gradient w.r.t. embedding (without backward pass)
-    grad = torch.autograd.grad(loss_ce, x_embed, retain_graph=True, create_graph=False)[0]
-
-    # Mask out padding token gradients to prevent unrealistic perturbations
-    mask_expand = mask.unsqueeze(-1)  # [batch, seq_len, 1]
-    grad = grad * mask_expand
- 
-    # Compute adversarial noise with proper L2 normalization
-    grad_flat = grad.view(grad.size(0), -1)  # [batch, seq_len*d_model]
-    norm = torch.norm(grad_flat, p=2, dim=1, keepdim=True).clamp(min=1e-8)  # [batch, 1]
-    epsilon = 3e-3  # Increased from 1e-3 for meaningful perturbations
-    noise = epsilon * grad / norm.view(-1, 1, 1)  # Proper broadcasting to [batch, seq_len, d_model]
-
-    # Create adversarial example (detach to prevent gradient flow)
-    x_embed_adv = (x_embed + noise).detach()
-
-    enc_output_adv, pred_error_prob_adv = model.encoder(src, src_mask, embed_input=x_embed_adv)
-
-    channel_enc_output = model.channel_encoder(enc_output_adv)
-    Tx_sig = power_normalize(channel_enc_output)
-
-    # Channel transmission with adversarial embedding
-    if channel == 'AWGN':
-        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
-    elif channel == 'Rayleigh':
-        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
-    elif channel == 'Rician':
-        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
-    elif channel == '3GPP':
-        batch_size, seq_len, features = Tx_sig.shape
-        assert features % 2 == 0, "Features must be even"
-        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
-        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0], Tx_sig_complex[..., 1])
-        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(Tx_sig_complex)
-        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
-        snr = 10 * np.log10(rx_signal_power / noise_power) if noise_power > 0 else -100
-
+    # Decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
     dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
     pred = model.dense(dec_output)
     ntokens = pred.size(-1)
 
-    # Compute loss with adversarial embedding
-    loss_ce_adv = loss_function(pred.contiguous().view(-1, ntokens), trg_real.contiguous().view(-1), pad, criterion)
+    # ===== CLEAN LOSS COMPUTATION =====
+    # Ground truth error label
+    true_error_label = labels.float()
+    
+    # CrossEntropy loss for sequence reconstruction
+    loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
+                           trg_real.contiguous().view(-1), pad, criterion)
+    
+    # Padding mask to ignore <PAD> tokens
+    mask = (src != pad).float()  # [batch, seq_len]
+    
+    # Binary Cross Entropy loss for error detection (with masking)
+    bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
+    loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-    # BCE loss for adversarial embedding
+    # Combined clean loss
+    loss_clean = loss_ce + lambda_bce * loss_bce
+
+    # ===== FGM ADVERSARIAL NOISE GENERATION (Eq. 9) =====
+    # Compute gradient of loss w.r.t. embedding N_A = ε · ∇_{X_embed} L / ||∇_{X_embed} L||_2
+    grad = torch.autograd.grad(loss_clean, x_embed, retain_graph=True, create_graph=False)[0]
+
+    # Apply padding mask to prevent unrealistic perturbations
+    mask_expand = mask.unsqueeze(-1)  # [batch, seq_len, 1]
+    grad = grad * mask_expand
+ 
+    # L2 normalization of gradient
+    norm = torch.norm(grad, p=2, dim=(1, 2), keepdim=True).clamp(min=1e-8)
+    noise = epsilon * grad / norm
+
+    # Create adversarial embedding (with detach to prevent gradient backflow to noise generation)
+    x_embed_adv = (x_embed + noise).detach()
+
+    # ===== FORWARD PASS - ADVERSARIAL =====
+    # Encoder with adversarial embedding
+    enc_output_adv, pred_error_prob_adv = model.encoder(src, src_mask, embed_input=x_embed_adv)
+    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+    Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+    # Channel transmission with adversarial embedding
+    if channel == 'AWGN':
+        Rx_sig_adv, snr_adv = channels.AWGN(Tx_sig_adv, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig_adv, snr_adv = channels.Rayleigh(Tx_sig_adv, n_var)
+    elif channel == 'Rician':
+        Rx_sig_adv, snr_adv = channels.Rician(Tx_sig_adv, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig_adv, snr_adv = channels.TimeVaryingRician(Tx_sig_adv, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig_adv.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig_adv.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0], Tx_sig_complex[..., 1])
+        Rx_sig_adv, rx_signal_power, noise_power = deepsc_channel.apply_channel(Tx_sig_complex)
+        Rx_sig_adv = torch.view_as_real(Rx_sig_adv).view(batch_size, seq_len, features)
+        snr_adv = 10 * np.log10(rx_signal_power / noise_power) if noise_power > 0 else -100
+
+    # Decoder
+    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+    dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask, src_mask)
+    pred_adv = model.dense(dec_output_adv)
+    ntokens_adv = pred_adv.size(-1)
+
+    # ===== ADVERSARIAL LOSS COMPUTATION =====
+    # CrossEntropy loss for adversarial example
+    loss_ce_adv = loss_function(pred_adv.contiguous().view(-1, ntokens_adv), 
+                               trg_real.contiguous().view(-1), pad, criterion)
+
+    # BCE loss for adversarial example
     bce_scores_adv = bce_loss_fn(pred_error_prob_adv, true_error_label)
     loss_bce_adv = (bce_scores_adv * mask).sum() / mask.sum()
 
-    # Adversarial loss component
-    loss_adv = loss_ce_adv + 0.5 * loss_bce_adv
+    # Combined adversarial loss
+    loss_adv = loss_ce_adv + lambda_bce * loss_bce_adv
 
-    # Balanced combination of clean and adversarial losses
-    loss_total = loss + 0.1 * loss_adv
+    # ===== FINAL TRAINING LOSS (Eq. 8) =====
+    # Balanced combination: min_ϕ E[L_clean + λ · L_adv]
+    loss_total = loss_clean + lambda_adv * loss_adv
 
     # Backward pass with gradient clipping for stability
-    opt.zero_grad()
     loss_total.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     opt.step()
 
-    return loss_total.item(), loss.item(), loss_adv.item(), snr
+    return loss_total.item(), loss_clean.item(), loss_adv.item(), snr
 
 def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel, bce_loss_fn):
     model.eval()
@@ -1257,7 +1275,7 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
         # Apply mask and average over non-padding positions
         loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-        loss = loss_ce + 0.5 * loss_bce
+        loss = loss_ce + 0.1 * loss_bce
 
     return loss.item(), snr
 

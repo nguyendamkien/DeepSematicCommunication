@@ -72,7 +72,7 @@ def inference(args, snr, net):
             sents = sents.to(device)
 
             # Decode sentences
-            out = greedy_decode(net, sents, noise_std, args.MAX_LENGTH, pad_idx,
+            out = greedy_decode_calibration(net, sents, noise_std, args.MAX_LENGTH, pad_idx,
                                 start_idx, args.channel)
 
             # Convert input (target) and model output to text
@@ -168,7 +168,7 @@ def test_sample_sentences(args, net, dataloader: DataLoader,
                     args.channel, seq_to_text=StoT
                 )
             else:
-                output_tokens, snr = greedy_decode(
+                output_tokens, snr = greedy_decode_calibration(
                     net, input_batch, noise_std, args.MAX_LENGTH, pad_idx,
                     start_idx,
                     args.channel,
@@ -254,7 +254,7 @@ def interactive_test(args, snr, net):
                 #                               start_idx,
                 #                               args.channel,
                 #                               device)
-                decoded, _ = greedy_decode(
+                decoded, _ = greedy_decode_calibration(
                     net, input_tensor, noise_std,
                     args.MAX_LENGTH, pad_idx, start_idx,
                     args.channel, device
@@ -355,12 +355,12 @@ if __name__ == '__main__':
     end_idx = token_to_idx["<END>"]
 
     # Define and load the model
-    deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
+    ca_deepsc = CA_DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
 
     checkpoint = load_checkpoint(args.checkpoint_path, mode='best')
     if checkpoint:
-        deepsc.load_state_dict(checkpoint['model_state_dict'])
+        ca_deepsc.load_state_dict(checkpoint['model_state_dict'])
         best_loss = checkpoint['loss']
         print(f"Loaded best checkpoint with loss {best_loss:.5f}")
     else:
@@ -387,7 +387,7 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         noise_std = SNR_to_noise(SNR)
-        output_tokens, _ = greedy_decode(deepsc, sample_noise, noise_std,
+        output_tokens, _ = greedy_decode_calibration(ca_deepsc, sample_noise, noise_std,
                                     args.MAX_LENGTH, pad_idx, start_idx, args.channel, device)
 
     # Convert tokens to text
@@ -410,7 +410,7 @@ if __name__ == '__main__':
     # ---------------------------------------------
 
 
-    interactive_test(args, SNR, deepsc)
+    interactive_test(args, SNR, ca_deepsc)
     #list_checkpoints("D:/timevaryingrician_checkpoints")
     #list_checkpoints("./kaggle/working/checkpoints/deepsc-AWGN")
 
