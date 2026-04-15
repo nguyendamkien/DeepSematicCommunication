@@ -23,14 +23,14 @@ from utils import SNR_to_noise, greedy_decode, SeqtoText, BleuScore, load_checkp
     debug_greedy_decode, greedy_decode_calibration
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data.pkl', type=str)
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)
 # parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='./kaggle/working/checkpoints/ca-deepsc-AWGN',
+                    default='./kaggle/working/checkpoints/deepsc-AWGN-semanticnoise',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
@@ -235,7 +235,7 @@ def interactive_test(args, snr, net):
             input_tokens = [start_idx] + [
                 token_to_idx.get(word, token_to_idx["<UNK>"])
                 for word in user_input.split()
-            ] + [4] + [end_idx]
+            ] + [end_idx]
 
             if len(input_tokens) > args.MAX_LENGTH + 2:  # +2 for start/end tokens
                 print(
@@ -254,7 +254,7 @@ def interactive_test(args, snr, net):
                 #                               start_idx,
                 #                               args.channel,
                 #                               device)
-                decoded, _ = greedy_decode_calibration(
+                decoded, _ = greedy_decode(
                     net, input_tensor, noise_std,
                     args.MAX_LENGTH, pad_idx, start_idx,
                     args.channel, device
@@ -272,7 +272,7 @@ def interactive_test(args, snr, net):
             for t in output_tokens:
                 if t == end_idx:  # token <END>
                     break          # dừng lấy token sau <END>
-                if t in (start_idx, 4):  # bỏ <START> và token 4
+                if t == start_idx:  # bỏ <START> và token 4
                     continue
                 clean_tokens.append(t)
 
@@ -355,7 +355,7 @@ if __name__ == '__main__':
     end_idx = token_to_idx["<END>"]
 
     # Define and load the model
-    deepsc = CA_DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
+    deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
 
     checkpoint = load_checkpoint(args.checkpoint_path, mode='best')
@@ -366,38 +366,44 @@ if __name__ == '__main__':
     else:
         print("No best checkpoint found.")
     # Verify that sentences are correctly padded and that the source mask is properly generated.
-    test_eur = EurDataset('noisy_test')  # Load test dataset
+    test_eur = EurDataset('test')  # Load test dataset
     test_iterator = DataLoader(test_eur, 128,
                                num_workers=0, pin_memory=True,
                                collate_fn=collate_pair_data)
     seq_to_text = SeqtoText(token_to_idx, end_idx)
     # --- Test một câu từ test set để BLEU cao ---
-    test_dataset = EurDataset('noisy_test')
-    print(test_dataset[0][0])
+    test_dataset = EurDataset('test')
+    # print(test_dataset[0][0])
     # Chọn câu đầu tiên từ test set, convert sang tensor
-    sample_sentence_1 = torch.tensor(test_dataset[4][0], dtype=torch.long).unsqueeze(0).to(device)
-    sample_sentence_2 = torch.tensor(test_dataset[4][1], dtype=torch.long).unsqueeze(0).to(device)
+    sample_noise = torch.tensor(test_dataset[4][0], dtype=torch.long).unsqueeze(0).to(device)
+    sample_clean = torch.tensor(test_dataset[4][1], dtype=torch.long).unsqueeze(0).to(device)
+    sample_label = torch.tensor(test_dataset[4][2], dtype=torch.long).unsqueeze(0).to(device)
+    print(sample_noise)
+    print(sample_clean)
+    print(sample_label)
     StoT = SeqtoText(token_to_idx, end_idx)
     bleu_score_calc = BleuScore(1, 0, 0, 0)
     similarity = Similarity(batch_size=1)
 
     with torch.no_grad():
         noise_std = SNR_to_noise(SNR)
-        output_tokens, _ = greedy_decode_calibration(deepsc, sample_sentence_1, noise_std,
+        output_tokens, _ = greedy_decode(deepsc, sample_noise, noise_std,
                                     args.MAX_LENGTH, pad_idx, start_idx, args.channel, device)
 
     # Convert tokens to text
-    input_text = StoT.sequence_to_text(sample_sentence_2.cpu().numpy().tolist()[0])
+    noise_text = StoT.sequence_to_text(sample_noise.cpu().numpy().tolist()[0])
+    clean_text = StoT.sequence_to_text(sample_clean.cpu().numpy().tolist()[0])
     sentence_1 = output_tokens.cpu().numpy().tolist()[0]
     output_text = StoT.sequence_to_text(sentence_1)
-    print(sample_sentence_1)
-    print(output_tokens)
+    # print(sample_sentence_1)
+    # print(output_tokens)
 
-    bleu = bleu_score_calc.compute_blue_score([input_text], [output_text])[0]
-    sim = similarity.compute_similarity([input_text], [output_text])[0]
+    bleu = bleu_score_calc.compute_blue_score([clean_text], [output_text])[0]
+    sim = similarity.compute_similarity([clean_text], [output_text])[0]
 
     print("\n--- Test hardcoded sample from test set ---")
-    print(f"Input : {input_text}")
+    print(f"Input: {noise_text}")
+    print(f"Clean: {clean_text}")
     print(f"Output: {output_text}")
     print(f"BLEU  : {bleu:.4f}")
     print(f"Sim   : {sim:.4f}\n")

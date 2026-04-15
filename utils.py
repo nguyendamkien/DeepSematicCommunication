@@ -519,7 +519,7 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel):
 
     return loss.item(), snr
 
-def val_step(model, src, trg, n_var, pad, criterion, channel):
+def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     model.eval()
     with torch.no_grad():
         trg_inp = trg[:, :-1]
@@ -1065,8 +1065,14 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Use ground truth labels from dataset instead of computing from src/trg difference
     true_error_label = labels.float()
 
+    # ===== 1. embedding =====
+    x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+    x_embed = model.encoder.pos_encoding(x_embed)
+    x_embed.requires_grad_(True)
+
+    # ===== 2. forward CLEAN =====
     # encoder + channel encoder
-    enc_output, pred_error_prob = model.encoder(src, src_mask)
+    enc_output, pred_error_prob = model.encoder(src, src_mask, embed_input=x_embed)
     channel_enc_output = model.channel_encoder(enc_output)
     Tx_sig = power_normalize(channel_enc_output)
 
@@ -1115,12 +1121,72 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     loss_bce = (bce_scores * mask).sum() / mask.sum()
 
     loss = loss_ce + 0.5 * loss_bce
-    
-    # backprop + update
-    loss.backward()
+
+    # ===== ADVERSARIAL NOISE GENERATION (FGM) =====
+    # Compute gradient w.r.t. embedding (without backward pass)
+    grad = torch.autograd.grad(loss_ce, x_embed, retain_graph=True, create_graph=False)[0]
+
+    # Mask out padding token gradients to prevent unrealistic perturbations
+    mask_expand = mask.unsqueeze(-1)  # [batch, seq_len, 1]
+    grad = grad * mask_expand
+ 
+    # Compute adversarial noise with proper L2 normalization
+    grad_flat = grad.view(grad.size(0), -1)  # [batch, seq_len*d_model]
+    norm = torch.norm(grad_flat, p=2, dim=1, keepdim=True).clamp(min=1e-8)  # [batch, 1]
+    epsilon = 3e-3  # Increased from 1e-3 for meaningful perturbations
+    noise = epsilon * grad / norm.view(-1, 1, 1)  # Proper broadcasting to [batch, seq_len, d_model]
+
+    # Create adversarial example (detach to prevent gradient flow)
+    x_embed_adv = (x_embed + noise).detach()
+
+    enc_output_adv, pred_error_prob_adv = model.encoder(src, src_mask, embed_input=x_embed_adv)
+
+    channel_enc_output = model.channel_encoder(enc_output_adv)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # Channel transmission with adversarial embedding
+    if channel == 'AWGN':
+        Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        Rx_sig, snr = channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0], Tx_sig_complex[..., 1])
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(Tx_sig_complex)
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(rx_signal_power / noise_power) if noise_power > 0 else -100
+
+    channel_dec_output = model.channel_decoder(Rx_sig)
+    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
+    pred = model.dense(dec_output)
+    ntokens = pred.size(-1)
+
+    # Compute loss with adversarial embedding
+    loss_ce_adv = loss_function(pred.contiguous().view(-1, ntokens), trg_real.contiguous().view(-1), pad, criterion)
+
+    # BCE loss for adversarial embedding
+    bce_scores_adv = bce_loss_fn(pred_error_prob_adv, true_error_label)
+    loss_bce_adv = (bce_scores_adv * mask).sum() / mask.sum()
+
+    # Adversarial loss component
+    loss_adv = loss_ce_adv + 0.5 * loss_bce_adv
+
+    # Balanced combination of clean and adversarial losses
+    loss_total = loss + 0.1 * loss_adv
+
+    # Backward pass with gradient clipping for stability
+    opt.zero_grad()
+    loss_total.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     opt.step()
 
-    return loss.item(), loss_bce.item(), snr
+    return loss_total.item(), loss.item(), loss_adv.item(), snr
 
 def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel, bce_loss_fn):
     model.eval()
@@ -1193,7 +1259,7 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
 
         loss = loss_ce + 0.5 * loss_bce
 
-    return loss.item(), loss_bce.item(), snr
+    return loss.item(), snr
 
 def greedy_decode_calibration(model, src, n_var, max_len, padding_idx, start_symbol,
                   channel, device):

@@ -26,7 +26,7 @@ from utils import BleuScore, SNR_to_noise, greedy_decode_calibration, SeqtoText,
 
 # Argument parser setup
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--data-dir', default='test_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
@@ -186,12 +186,12 @@ def performance(args, SNR, net):
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, (noise_sents, trg) in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, clean_sents, labels) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 
                         noise_sents = noise_sents.to(device)
-                        target = trg.to(device)
+                        target = clean_sents.to(device)
                         out, snr_value = greedy_decode_calibration(net, noise_sents, noise_std,
                                                        args.MAX_LENGTH, pad_idx,
                                                        start_idx,

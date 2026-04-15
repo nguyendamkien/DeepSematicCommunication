@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import EurDataset, collate_data
+from dataset import EurDataset, collate_pair_data
 # from models.mutual_info import Mine
 from models.transceiver import DeepSC
 from utils import SNR_to_noise, train_step, val_step, initNetParams, \
@@ -69,7 +69,7 @@ def train(epoch, args, net, mi_net=None):
     train_eur = EurDataset('train')
     train_iterator = DataLoader(train_eur, batch_size=args.batch_size,
                                 num_workers=0, pin_memory=True,
-                                collate_fn=collate_data)
+                                collate_fn=collate_pair_data)
     pbar = tqdm(train_iterator)
     # For TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
@@ -78,13 +78,14 @@ def train(epoch, args, net, mi_net=None):
     batch_count = 0
     snr_values = []
 
-    for sents in pbar:
+    for noise_sents, clean_sents, labels in pbar:
         if stop_training:
             return True, epoch_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
                 snr_values) if snr_values else 0, max(
                 snr_values) if snr_values else 0, sum(snr_values) / len(
                 snr_values) if snr_values else 0
-        sents = sents.to(device)
+        noise_sents = noise_sents.to(device)
+        clean_sents = clean_sents.to(device)
         # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
         # For original Channel
         noise_std = float(
@@ -102,7 +103,7 @@ def train(epoch, args, net, mi_net=None):
         #     pbar.set_description(
         #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
         # else:
-        loss_total, snr = train_step(net, sents, sents, noise_std, pad_idx,
+        loss_total, snr = train_step(net, noise_sents, clean_sents, noise_std, pad_idx,
                                      optimizer, criterion, args.channel)
         epoch_loss += loss_total
         snr_values.append(snr)
@@ -122,7 +123,7 @@ def validate(epoch, args, net, seq_to_text):
     test_eur = EurDataset('test')  # Load test dataset
     test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
-                               collate_fn=collate_data)
+                               collate_fn=collate_pair_data)
 
     # # Print a sample batch from test_iterator for debugging
     # sample_batch = next(iter(test_iterator))  # Get first batch
@@ -146,10 +147,11 @@ def validate(epoch, args, net, seq_to_text):
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
     # noise_std = np.random.choice(noise_std_options, size=1)
     with torch.no_grad():
-        for sents in pbar:
+        for noise_sents, clean_sents, labels in pbar:
             # print(f"Batch contains {sents.shape[0]} sentences")
-            sents = sents.to(device)
-            loss, snr = val_step(net, sents, sents, 0.1, pad_idx, criterion,
+            noise_sents = noise_sents.to(device)
+            clean_sents = clean_sents.to(device)
+            loss, snr = val_step(net, noise_sents, clean_sents, 0.1, pad_idx, criterion,
                                  args.channel, seq_to_text)
             # TimeVaryingRician
             # loss, snr = val_step(net, sents, sents, 0.18, pad_idx, criterion,
