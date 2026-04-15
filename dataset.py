@@ -26,7 +26,7 @@ class EurDataset(Dataset):
         data_dir = './data/' # Deserialize the data
 
          # Load the dataset from the corresponding pickle file (e.g., train_data.pkl, test_data.pkl)
-        with open(data_dir + '{}_data.pkl'.format(split), 'rb') as f:
+        with open(data_dir + '{}_data_with_error.pkl'.format(split), 'rb') as f:
             self.data = pickle.load(f)  # Deserialize the data 
 
     def __getitem__(self, index):
@@ -76,4 +76,39 @@ def collate_data(batch):
 
      # Convert NumPy array to a PyTorch tensor for model input
     return torch.from_numpy(sents)
+
+import numpy as np
+import torch
+
+def collate_pair_data(batch):
+    batch_size = len(batch)
+    target_len = 35
+
+    # 🔥 Tách src, trg, và labels
+    noise_sents = [item[0] for item in batch]
+    trg_sents = [item[1] for item in batch]
+    labels = [item[2] for item in batch]
+
+    # (optional) sort theo độ dài src
+    sort_idx = sorted(range(batch_size), key=lambda i: len(noise_sents[i]), reverse=True)
+    noise_sents = [noise_sents[i] for i in sort_idx]
+    trg_sents = [trg_sents[i] for i in sort_idx]
+    labels = [labels[i] for i in sort_idx]
+
+    # tạo tensor padding
+    noise = np.zeros((batch_size, target_len), dtype=np.int64)
+    trg = np.zeros((batch_size, target_len), dtype=np.int64)
+    label_tensor = np.zeros((batch_size, target_len), dtype=np.float32)
+
+    for i in range(batch_size):
+        noise_len = min(len(noise_sents[i]), target_len)
+        trg_len = min(len(trg_sents[i]), target_len)
+        label_len = min(len(labels[i]), target_len)
+
+        noise[i, :noise_len] = noise_sents[i][:noise_len]
+        trg[i, :trg_len] = trg_sents[i][:trg_len]
+        label_tensor[i, :label_len] = labels[i][:label_len]
+
+    return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
+
 

@@ -22,8 +22,8 @@ from utils import SNR_to_noise, greedy_decode, SeqtoText, BleuScore, load_checkp
     debug_greedy_decode
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data.pkl', type=str)
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)
@@ -234,7 +234,7 @@ def interactive_test(args, snr, net):
             input_tokens = [start_idx] + [
                 token_to_idx.get(word, token_to_idx["<UNK>"])
                 for word in user_input.split()
-            ] + [4] + [end_idx]
+            ] + [end_idx]
 
             if len(input_tokens) > args.MAX_LENGTH + 2:  # +2 for start/end tokens
                 print(
@@ -274,7 +274,7 @@ def interactive_test(args, snr, net):
             for t in output_tokens:
                 if t == end_idx:  # token <END>
                     break          # dừng lấy token sau <END>
-                if t in (start_idx, 4):  # bỏ <START> và token 4
+                if t == start_idx:  # bỏ <START>
                     continue
                 clean_tokens.append(t)
 
