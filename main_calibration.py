@@ -25,7 +25,7 @@ plt.ion() # Turn on interactive mode
 parser = argparse.ArgumentParser()
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='/kaggle/working/checkpoints/ca-deepsc-AWGN',
+                    default='/kaggle/working/checkpoints/ca-adv-deepsc-AWGN',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str,
                     help='Please choose AWGN, Rayleigh, and Rician')
@@ -128,8 +128,8 @@ def train(epoch, args, net, mi_net=None):
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
-    test_eur = EurDataset('test')  # Load test dataset
-    test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
+    val_eur = EurDataset('val')  # Load test dataset
+    val_iterator = DataLoader(val_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
                                collate_fn=collate_pair_data)
 
@@ -149,7 +149,7 @@ def validate(epoch, args, net, seq_to_text):
     # print_padded_sentences(test_iterator, seq_to_text, pad_idx)
 
     net.eval()
-    pbar = tqdm(test_iterator)
+    pbar = tqdm(val_iterator)
     total = 0
     # Noise_std for TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
@@ -168,7 +168,7 @@ def validate(epoch, args, net, seq_to_text):
             total += loss
             pbar.set_description(
                 f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}')
-    return total / len(test_iterator)
+    return total / len(val_iterator)
 
 def save_checkpoint(epoch, avg_loss, epoch_train_loss_total, epoch_train_loss_clean, epoch_train_loss_adv,
                     avg_mi_bits, snr_min, snr_max, snr_avg):
@@ -183,6 +183,7 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss_total, epoch_train_loss_cl
         'model_state_dict': ca_deepsc.state_dict(),
         # 'mi_net_state_dict': mi_net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),  # Lưu scheduler state
         # 'mi_opt_state_dict': mi_opt.state_dict(),
         'loss': avg_loss,
         'train_loss_total': epoch_train_loss_total,
@@ -194,8 +195,10 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss_total, epoch_train_loss_cl
         'snr_avg': snr_avg,
     }, checkpoint_path)
 
+    current_lr = optimizer.param_groups[0]['lr']
     print(
-        f"Checkpoint saved at {checkpoint_path} with epoch {epoch + 1}, val loss {avg_loss:.5f}, SNR Min: {snr_min:.2f}, Max: {snr_max:.2f}, Avg: {snr_avg:.2f}")
+        f"Checkpoint saved at {checkpoint_path} with epoch {epoch + 1}, val loss {avg_loss:.5f}, "
+        f"LR: {current_lr:.2e}, SNR Min: {snr_min:.2f}, Max: {snr_max:.2f}, Avg: {snr_avg:.2f}")
 
 if __name__ == '__main__':
     # Check PyTorch's CUDA availability
@@ -264,6 +267,11 @@ if __name__ == '__main__':
     bce_loss_fn = nn.BCELoss(reduction='none')
     optimizer = torch.optim.Adam(ca_deepsc.parameters(), lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
+    # LR Scheduler: giảm LR x0.5 nếu val loss không cải thiện sau 2 epoch
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, min_lr=1e-6,
+        verbose=True
+    )
     # mi_opt = torch.optim.Adam(mi_net.parameters(), lr=0.001)
 
     initNetParams(ca_deepsc)
@@ -289,6 +297,9 @@ if __name__ == '__main__':
             ca_deepsc.load_state_dict(checkpoint['model_state_dict'])
             # mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Restore scheduler state nếu có (backward-compatible)
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             # mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
             print(
                 f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
@@ -323,6 +334,11 @@ if __name__ == '__main__':
         avg_loss = validate(epoch, args, ca_deepsc, seq_to_text)
         save_checkpoint(epoch, avg_loss, epoch_train_loss_total, epoch_train_loss_clean, epoch_train_loss_adv,
                 avg_mi_bits, snr_min, snr_max, snr_avg)
+
+        # Bước scheduler dựa trên val loss để tự động giảm LR khi cần
+        scheduler.step(avg_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Current LR: {current_lr:.2e}")
 
         print(f"GPU Utilization: {torch.cuda.utilization(0)}%")
         print(

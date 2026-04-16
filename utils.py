@@ -1047,8 +1047,8 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
         lambda_adv: weight for adversarial loss combination (default 0.2)
         lambda_bce: weight for BCE loss component (default 0.1)
     """
-    epsilon=0.01
-    lambda_adv=0.2
+    epsilon=0.1       # Đủ lớn để tạo perturbation có ý nghĩa (trước là 0.01 quá nhỏ)
+    lambda_adv=0.5     # Cân bằng clean/adv loss (trước là 0.2 quá nhỏ → adv không hiệu quả)
     lambda_bce=0.1
     
     model.train()
@@ -1140,17 +1140,18 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
 
     # ===== FGM ADVERSARIAL NOISE GENERATION (Eq. 9) =====
     # Compute gradient of loss w.r.t. embedding N_A = ε · ∇_{X_embed} L / ||∇_{X_embed} L||_2
+    # retain_graph=True vì sau đó cần backward qua clean graph lần nữa trong loss_total.backward()
     grad = torch.autograd.grad(loss_clean, x_embed, retain_graph=True, create_graph=False)[0]
 
-    # Apply padding mask to prevent unrealistic perturbations
+    # Apply padding mask to prevent unrealistic perturbations on <PAD> tokens
     mask_expand = mask.unsqueeze(-1)  # [batch, seq_len, 1]
     grad = grad * mask_expand
- 
-    # L2 normalization of gradient
-    norm = torch.norm(grad, p=2, dim=(1, 2), keepdim=True).clamp(min=1e-8)
+
+    # L2 normalization of gradient (per-sample để noise uniform across batch)
+    norm = torch.norm(grad.view(grad.size(0), -1), p=2, dim=1, keepdim=True).unsqueeze(-1).clamp(min=1e-8)
     noise = epsilon * grad / norm
 
-    # Create adversarial embedding (with detach to prevent gradient backflow to noise generation)
+    # Create adversarial embedding (detach để noise không có gradient)
     x_embed_adv = (x_embed + noise).detach()
 
     # ===== FORWARD PASS - ADVERSARIAL =====
@@ -1199,8 +1200,10 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Balanced combination: min_ϕ E[L_clean + λ · L_adv]
     loss_total = loss_clean + lambda_adv * loss_adv
 
-    # Backward pass with gradient clipping for stability
+    # Backward pass: zero_grad lại trước backward để xoá gradient từ bước FGM
+    opt.zero_grad()
     loss_total.backward()
+    # Gradient clipping để tránh exploding gradients
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     opt.step()
 

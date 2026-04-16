@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BertModel, BertTokenizer
 
-from dataset import EurDataset, collate_data, collate_pair_data
+from dataset import EurDataset, collate_pair_data
 from models.transceiver_calibration import CA_DeepSC
 from utils import BleuScore, SNR_to_noise, greedy_decode_calibration, SeqtoText, \
     save_evaluation_scores, load_checkpoint
@@ -276,7 +276,7 @@ def performance(args, SNR, net):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    SNR = [0, 3, 6, 9, 12, 15, 18]
+    SNR = [-9, -6, -3, 0, 3, 6, 9, 12, 15, 18]
     # SNR = [18]
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
     args.vocab_file = './data/' + args.vocab_file

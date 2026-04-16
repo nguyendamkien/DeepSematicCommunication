@@ -120,8 +120,8 @@ def train(epoch, args, net, mi_net=None):
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
-    test_eur = EurDataset('test')  # Load test dataset
-    test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
+    val_eur = EurDataset('val')  # Load val dataset
+    val_iterator = DataLoader(val_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
                                collate_fn=collate_pair_data)
 
@@ -141,7 +141,7 @@ def validate(epoch, args, net, seq_to_text):
     # print_padded_sentences(test_iterator, seq_to_text, pad_idx)
 
     net.eval()
-    pbar = tqdm(test_iterator)
+    pbar = tqdm(val_iterator)
     total = 0
     # Noise_std for TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
@@ -159,7 +159,7 @@ def validate(epoch, args, net, seq_to_text):
             total += loss
             pbar.set_description(
                 f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}')
-    return total / len(test_iterator)
+    return total / len(val_iterator)
 
 # Function to save checkpoint for each epoch
 def save_checkpoint(epoch, avg_loss, epoch_train_loss,

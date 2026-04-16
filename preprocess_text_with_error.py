@@ -10,6 +10,7 @@ from collections import Counter # count frequency of each element
 
 import nltk # Natural Languages Toolkit - library for NLP
 from matplotlib import pyplot as plt
+import random
 
 # !/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -34,6 +35,7 @@ nltk.download('punkt', quiet=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--input-data-dir', default='europarl/txt/en', type=str)
 parser.add_argument('--output-train-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--output-val-dir', default='val_data_with_error.pkl', type=str)
 parser.add_argument('--output-test-dir', default='test_data_with_error.pkl', type=str)
 parser.add_argument('--output-vocab', default='vocab_with_error.json', type=str)
 
@@ -253,6 +255,7 @@ def main(args):
     args.input_data_dir = [os.path.join(data_dir, args.input_data_dir)]
 
     args.output_train_dir = os.path.join(data_dir, args.output_train_dir)
+    args.output_val_dir = os.path.join(data_dir, args.output_val_dir)
     args.output_test_dir = os.path.join(data_dir, args.output_test_dir)
     args.output_vocab = os.path.join(data_dir, args.output_vocab)
 
@@ -261,46 +264,46 @@ def main(args):
     print('Preprocess Raw Text')
 
     # Process and clean all text files in the input directories
-    # for input_dir in args.input_data_dir:
-    #     if not os.path.exists(input_dir):
-    #         print(f"Warning: Directory {input_dir} does not exist, skipping...")
-    #         continue
-    #     for fn in tqdm(os.listdir(input_dir)):
-    #         if not fn.endswith('.txt'):
-    #             continue
-    #         file_path = os.path.join(input_dir, fn)
+    for input_dir in args.input_data_dir:
+        if not os.path.exists(input_dir):
+            print(f"Warning: Directory {input_dir} does not exist, skipping...")
+            continue
+        for fn in tqdm(os.listdir(input_dir)):
+            if not fn.endswith('.txt'):
+                continue
+            file_path = os.path.join(input_dir, fn)
 
-    #         sentences, filtered_sentences = process(file_path)
-    #         total_sentences.extend(sentences)
-    #         total_filtered_sentences.extend(filtered_sentences)
+            sentences, filtered_sentences = process(file_path)
+            total_sentences.extend(sentences)
+            total_filtered_sentences.extend(filtered_sentences)
 
-    # # **Print total number of sentences before any processing**
-    # print(f"Total sentences before any processing: {len(total_sentences)}")
+    # **Print total number of sentences before any processing**
+    print(f"Total sentences before any processing: {len(total_sentences)}")
 
-    # # Compute statistics
-    # total_before_length_filter = len(total_sentences)
-    # total_after_length_filter = len(total_filtered_sentences)
-    # removed_by_length = total_before_length_filter - total_after_length_filter
+    # Compute statistics
+    total_before_length_filter = len(total_sentences)
+    total_after_length_filter = len(total_filtered_sentences)
+    removed_by_length = total_before_length_filter - total_after_length_filter
 
-    # unique_sentences = list(set(total_filtered_sentences))
-    # removed_by_uniqueness = total_after_length_filter - len(unique_sentences)
+    unique_sentences = list(set(total_filtered_sentences))
+    removed_by_uniqueness = total_after_length_filter - len(unique_sentences)
 
-    # print("Total sentences removed by length filtering:", removed_by_length)
-    # print("Total sentences removed after removing duplicates:",
-    #       removed_by_uniqueness)
-    # print("Number of sentences after filtering:", len(unique_sentences))
+    print("Total sentences removed by length filtering:", removed_by_length)
+    print("Total sentences removed after removing duplicates:",
+          removed_by_uniqueness)
+    print("Number of sentences after filtering:", len(unique_sentences))
 
     # # print(unique_sentences[:10])
 
-    unique_sentences = [
-    "She is playing football in the park with her friends while they are enjoying the sunny afternoon together outside happily and feeling very excited about their weekend activities planned",
+#     unique_sentences = [
+#     "She is playing football in the park with her friends while they are enjoying the sunny afternoon together outside happily and feeling very excited about their weekend activities planned",
     
-    "She goes to school every day to learn new things and meet her friends because she wants to improve herself and achieve her dreams in the future successfully always",
+#     "She goes to school every day to learn new things and meet her friends because she wants to improve herself and achieve her dreams in the future successfully always",
     
-    "They are very happy together because they love each other deeply and always support one another through every difficult and joyful moment in life with strong mutual trust always",
+#     "They are very happy together because they love each other deeply and always support one another through every difficult and joyful moment in life with strong mutual trust always",
     
-    "I am beautiful and I know it because I believe in myself and appreciate my unique qualities every single day with confidence and positivity while growing stronger each moment"
-]
+#     "I am beautiful and I know it because I believe in myself and appreciate my unique qualities every single day with confidence and positivity while growing stronger each moment"
+# ]
     print('Build Deletion Candidates')
     deletion_cands = build_deletion_candidates(unique_sentences)
     print(f"Deletion candidates (first 20): {deletion_cands[:100]}\n")
@@ -367,19 +370,29 @@ def main(args):
         results.append((noise_ids, clean_ids, labels))
 
     print('Writing Data')
-    # Split the data into train and test sets
-    train_data = results[: round(len(results) * 0.9)]
-    test_data = results[round(len(results) * 0.9):]
+    # Split the data into train, val and test sets
+    random.shuffle(results)
+    n = len(results)
+    train_data = results[: int(0.8 * n)]
+    val_data   = results[int(0.8 * n): int(0.9 * n)]
+    test_data  = results[int(0.9 * n):]
 
     # **Print sample of train and test data**
     print("Sample from train data:",
           train_data[:5])  # Print first 5 samples from train data
+    print(len(train_data))
+    print("Sample from val data:",
+          val_data[:5])  # Print first 5 samples from val data
+    print(len(val_data))
     print("Sample from test data:",
           test_data[:5])  # Print first 5 samples from test data
+    print(len(test_data))
     
     # Save the train and test data as pickle files
     with open(args.output_train_dir, 'wb') as f:
         pickle.dump(train_data, f)
+    with open(args.output_val_dir, 'wb') as f:
+        pickle.dump(val_data, f)
     with open(args.output_test_dir, 'wb') as f:
         pickle.dump(test_data, f)
 
