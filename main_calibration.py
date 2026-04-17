@@ -264,7 +264,7 @@ if __name__ == '__main__':
     # mi_net = Mine().to(device)
     criterion = nn.CrossEntropyLoss(reduction='none')
     #Binary cross entropy
-    bce_loss_fn = nn.BCELoss(reduction='none')
+    bce_loss_fn = nn.BCEWithLogitsLoss(reduction='none')
     optimizer = torch.optim.Adam(ca_deepsc.parameters(), lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
     # LR Scheduler: giảm LR x0.5 nếu val loss không cải thiện sau 2 epoch

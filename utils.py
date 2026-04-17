@@ -1130,7 +1130,8 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     
     # Binary Cross Entropy loss for error detection (with masking)
     bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
-    loss_bce = (bce_scores * mask).sum() / mask.sum()
+    denom = mask.sum().clamp(min=1.0)
+    loss_bce = (bce_scores * mask).sum() / denom
 
     # Combined clean loss
     loss_clean = loss_ce + lambda_bce * loss_bce
@@ -1145,11 +1146,12 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     grad = grad * mask_expand
 
     # L2 normalization of gradient (per-sample để noise uniform across batch)
-    norm = torch.norm(grad.view(grad.size(0), -1), p=2, dim=1, keepdim=True).unsqueeze(-1).clamp(min=1e-8)
+    norm = torch.norm(grad, p=2, dim=-1, keepdim=True)  # theo token
     noise = epsilon * grad / norm
+    noise = noise.detach()
 
     # Create adversarial embedding (detach để noise không có gradient)
-    x_embed_adv = (x_embed + noise).detach()
+    x_embed_adv = x_embed + noise
 
     # ===== FORWARD PASS - ADVERSARIAL =====
     # Encoder with adversarial embedding
@@ -1188,14 +1190,15 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
 
     # BCE loss for adversarial example
     bce_scores_adv = bce_loss_fn(pred_error_prob_adv, true_error_label)
-    loss_bce_adv = (bce_scores_adv * mask).sum() / mask.sum()
+    denom_adv = mask.sum().clamp(min=1.0)
+    loss_bce_adv = (bce_scores_adv * mask).sum() / denom_adv
 
     # Combined adversarial loss
     loss_adv = loss_ce_adv + lambda_bce * loss_bce_adv
 
     # ===== FINAL TRAINING LOSS (Eq. 8) =====
     # Balanced combination: min_ϕ E[L_clean + λ · L_adv]
-    loss_total = loss_clean + lambda_adv * loss_adv
+    loss_total = (1 - lambda_adv) * loss_clean + lambda_adv * loss_adv
 
     # Backward pass
     opt.zero_grad()  # Zero gradients một lần duy nhất trước backward
