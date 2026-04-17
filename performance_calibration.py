@@ -186,7 +186,7 @@ def performance(args, SNR, net):
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, (noise_sents, trg) in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, trg, label) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 

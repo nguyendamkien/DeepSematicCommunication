@@ -1114,7 +1114,7 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Apply mask and average over non-padding positions
     loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-    loss = loss_ce + 0.5 * loss_bce
+    loss = loss_ce + 0.1 * loss_bce
     
     # backprop + update
     loss.backward()
@@ -1191,7 +1191,7 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
         # Apply mask and average over non-padding positions
         loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-        loss = loss_ce + 0.5 * loss_bce
+        loss = loss_ce + 0.1 * loss_bce
 
     return loss.item(), loss_bce.item(), snr
 

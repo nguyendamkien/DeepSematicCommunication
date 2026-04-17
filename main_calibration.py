@@ -64,7 +64,7 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 # Training funtion
-def train(epoch, args, net, num_vocab, mi_net=None):
+def train(epoch, args, net, mi_net=None):
     global stop_training
     train_eur = EurDataset('train')
     train_iterator = DataLoader(train_eur, batch_size=args.batch_size,
@@ -124,8 +124,8 @@ def train(epoch, args, net, num_vocab, mi_net=None):
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
-    test_eur = EurDataset('test')  # Load test dataset
-    test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
+    val_eur = EurDataset('val')  # Load test dataset
+    val_iterator = DataLoader(val_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
                                collate_fn=collate_pair_data)
 
@@ -145,7 +145,7 @@ def validate(epoch, args, net, seq_to_text):
     # print_padded_sentences(test_iterator, seq_to_text, pad_idx)
 
     net.eval()
-    pbar = tqdm(test_iterator)
+    pbar = tqdm(val_iterator)
     total = 0
     total_bce = 0
     # Noise_std for TimeVaryingRician
@@ -165,7 +165,7 @@ def validate(epoch, args, net, seq_to_text):
             total_bce += bce_loss_val
             pbar.set_description(
                 f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}; BCE: {bce_loss_val:.5f}')
-    return total / len(test_iterator), total_bce / len(test_iterator)
+    return total / len(val_iterator), total_bce / len(val_iterator)
 
 def save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_loss,
                     avg_mi_bits, snr_min, snr_max, snr_avg):
