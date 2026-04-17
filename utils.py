@@ -1053,9 +1053,6 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     
     model.train()
     
-    # Zero gradients at the beginning
-    opt.zero_grad()
-    
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
     channels = Channels()
@@ -1200,8 +1197,8 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Balanced combination: min_ϕ E[L_clean + λ · L_adv]
     loss_total = loss_clean + lambda_adv * loss_adv
 
-    # Backward pass: zero_grad lại trước backward để xoá gradient từ bước FGM
-    opt.zero_grad()
+    # Backward pass
+    opt.zero_grad()  # Zero gradients một lần duy nhất trước backward
     loss_total.backward()
     # Gradient clipping để tránh exploding gradients
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
