@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import EurDataset, collate_data
+from dataset import EurDataset, collate_pair_data
 from models.mutual_info import Mine
 from models.transceiver import DeepSC
 from utils import SNR_to_noise, train_step, val_step, initNetParams, \
@@ -23,9 +23,9 @@ plt.ion() # Turn on interactive mode
 
 # Argument parser for configuring hyperparameters and paths
 parser = argparse.ArgumentParser()
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='/kaggle/working/checkpoints/deepsc-AWGN',
+                    default='/kaggle/working/checkpoints/deepsc-AWGN-sn',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str,
                     help='Please choose AWGN, Rayleigh, and Rician')
@@ -69,7 +69,7 @@ def train(epoch, args, net, mi_net=None):
     train_eur = EurDataset('train')
     train_iterator = DataLoader(train_eur, batch_size=args.batch_size,
                                 num_workers=0, pin_memory=True,
-                                collate_fn=collate_data)
+                                collate_fn=collate_pair_data)
     pbar = tqdm(train_iterator)
     # For TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
@@ -78,21 +78,23 @@ def train(epoch, args, net, mi_net=None):
     batch_count = 0
     snr_values = []
 
-    for sents in pbar:
+    for noise_sents, trg_sents, label_tensors in pbar:
         if stop_training:
             return True, epoch_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
                 snr_values) if snr_values else 0, max(
                 snr_values) if snr_values else 0, sum(snr_values) / len(
                 snr_values) if snr_values else 0
-        sents = sents.to(device)
+        noise_sents = noise_sents.to(device)
+        trg_sents = trg_sents.to(device)
+        label_tensors = label_tensors.to(device)
         # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
         # For original Channel
         noise_std = float(
             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
         if mi_net is not None:
-            mi_loss, mi_bits = train_mi(net, mi_net, sents, 0.1, pad_idx,
+            mi_loss, mi_bits = train_mi(net, mi_net, noise_sents, 0.1, pad_idx,
                                         mi_opt, args.channel)
-            loss_total, snr = train_step(net, sents, sents, 0.1, pad_idx,
+            loss_total, snr = train_step(net, noise_sents, trg_sents, 0.1, pad_idx,
                                          optimizer, criterion, args.channel,
                                          mi_net)
             epoch_loss += loss_total
@@ -102,7 +104,7 @@ def train(epoch, args, net, mi_net=None):
             pbar.set_description(
                 f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
         else:
-            loss_total, snr = train_step(net, sents, sents, noise_std, pad_idx,
+            loss_total, snr = train_step(net, noise_sents, trg_sents, noise_std, pad_idx,
                                         optimizer, criterion, args.channel)
             epoch_loss += loss_total
             snr_values.append(snr)
@@ -119,10 +121,10 @@ def train(epoch, args, net, mi_net=None):
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
-    test_eur = EurDataset('test')  # Load test dataset
-    test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
+    val_eur = EurDataset('val')  # Load test dataset
+    val_iterator = DataLoader(val_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
-                               collate_fn=collate_data)
+                               collate_fn=collate_pair_data)
 
     # # Print a sample batch from test_iterator for debugging
     # sample_batch = next(iter(test_iterator))  # Get first batch
@@ -140,16 +142,18 @@ def validate(epoch, args, net, seq_to_text):
     # print_padded_sentences(test_iterator, seq_to_text, pad_idx)
 
     net.eval()
-    pbar = tqdm(test_iterator)
+    pbar = tqdm(val_iterator)
     total = 0
     # Noise_std for TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
     # noise_std = np.random.choice(noise_std_options, size=1)
     with torch.no_grad():
-        for sents in pbar:
+        for noise_sents, trg_sents, label_tensors in pbar:
             # print(f"Batch contains {sents.shape[0]} sentences")
-            sents = sents.to(device)
-            loss, snr = val_step(net, sents, sents, 0.1, pad_idx, criterion,
+            noise_sents = noise_sents.to(device)
+            trg_sents = trg_sents.to(device)
+            label_tensors = label_tensors.to(device)
+            loss, snr = val_step(net, noise_sents, trg_sents, 0.1, pad_idx, criterion,
                                  args.channel, seq_to_text)
             # TimeVaryingRician
             # loss, snr = val_step(net, sents, sents, 0.18, pad_idx, criterion,
@@ -157,7 +161,7 @@ def validate(epoch, args, net, seq_to_text):
             total += loss
             pbar.set_description(
                 f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}')
-    return total / len(test_iterator)
+    return total / len(val_iterator)
 
 # Function to save checkpoint for each epoch
 def save_checkpoint(epoch, avg_loss, epoch_train_loss,
@@ -265,7 +269,7 @@ if __name__ == '__main__':
         start = time.time()
         # Training
         interrupted, epoch_train_loss, avg_mi_bits, snr_min, snr_max, snr_avg = train(
-            epoch, args, deepsc, mi_net)
+            epoch, args, deepsc)
         if interrupted:
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")

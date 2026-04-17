@@ -19,15 +19,15 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BertModel, BertTokenizer
 
-from dataset import EurDataset, collate_data
+from dataset import EurDataset, collate_pair_data
 from models.transceiver import DeepSC
 from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
     save_evaluation_scores, load_checkpoint
 
 # Argument parser setup
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data.pkl', type=str)
-parser.add_argument('--vocab-file', default='vocab.json', type=str)
+parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)
@@ -179,20 +179,21 @@ def performance(args, SNR, net):
                 # Reload DataLoader for each epoch
                 test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
                                            num_workers=0, pin_memory=True,
-                                           collate_fn=collate_data)
+                                           collate_fn=collate_pair_data)
 
                 samples_processed = 0  # Track the number of samples processed
 
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, sents in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, trg_sents, label_tensors) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 
-                        sents = sents.to(device)
-                        target = sents
-                        out, snr_value = greedy_decode(net, sents, noise_std,
+                        noise_sents = noise_sents.to(device)
+                        trg_sents = trg_sents.to(device)
+                        label_tensors = label_tensors.to(device)
+                        out, snr_value = greedy_decode(net, noise_sents, noise_std,
                                                        args.MAX_LENGTH, pad_idx,
                                                        start_idx,
                                                        args.channel, device)
@@ -200,13 +201,13 @@ def performance(args, SNR, net):
                         result_string = list(
                             map(StoT.sequence_to_text, sentences))
                         word.extend(result_string)
-                        target_sent = target.cpu().numpy().tolist()
+                        target_sent = trg_sents.cpu().numpy().tolist()
                         result_string = list(
                             map(StoT.sequence_to_text, target_sent))
                         target_word.extend(result_string)
 
                         # Update samples processed
-                        batch_size = sents.size(0)
+                        batch_size = noise_sents.size(0)
                         samples_processed += batch_size
                         pbar.update(batch_size)
 
@@ -274,7 +275,7 @@ def performance(args, SNR, net):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    SNR = [0, 3, 6, 9, 12, 15, 18]
+    SNR = [-9, -6, -3, 0, 3, 6, 9, 12, 15, 18]
     # SNR = [18]
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
     args.vocab_file = './data/' + args.vocab_file
