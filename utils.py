@@ -1146,8 +1146,8 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     grad = grad * mask_expand
 
     # L2 normalization of gradient (per-sample để noise uniform across batch)
-    norm = torch.norm(grad, p=2, dim=-1, keepdim=True)  # theo token
-    noise = epsilon * grad / norm
+    norm = torch.norm(grad, p=2, dim=-1, keepdim=True)
+    noise = epsilon * grad / (norm + 1e-8)
     noise = noise.detach()
 
     # Create adversarial embedding (detach để noise không có gradient)
