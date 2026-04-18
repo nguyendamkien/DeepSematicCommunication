@@ -87,7 +87,8 @@ def train(epoch, args, net, mi_net=None):
                 snr_values) if snr_values else 0, sum(snr_values) / len(
                 snr_values) if snr_values else 0
         noise_sents = noise_sents.to(device)
-        clean_sent = clean_sents.to(device)
+        clean_sents = clean_sents.to(device)
+        labels = labels.to(device)
         # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
         # For original Channel
         noise_std = float(
