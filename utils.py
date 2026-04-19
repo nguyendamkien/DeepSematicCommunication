@@ -1048,7 +1048,7 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
         lambda_bce: weight for BCE loss component (default 0.1)
     """
     epsilon=0.1       # Đủ lớn để tạo perturbation có ý nghĩa (trước là 0.01 quá nhỏ)
-    lambda_adv=0.5     # Cân bằng clean/adv loss (trước là 0.2 quá nhỏ → adv không hiệu quả)
+    lambda_adv=0.3    # Cân bằng clean/adv loss (trước là 0.2 quá nhỏ → adv không hiệu quả)
     lambda_bce=0.1
     
     model.train()
@@ -1133,6 +1133,9 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     denom = mask.sum().clamp(min=1.0)
     loss_bce = (bce_scores * mask).sum() / denom
 
+    # Zero gradients một lần duy nhất trước backward
+    opt.zero_grad()  
+
     # Combined clean loss
     loss_clean = loss_ce + lambda_bce * loss_bce
 
@@ -1201,7 +1204,6 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     loss_total = (1 - lambda_adv) * loss_clean + lambda_adv * loss_adv
 
     # Backward pass
-    opt.zero_grad()  # Zero gradients một lần duy nhất trước backward
     loss_total.backward()
     # Gradient clipping để tránh exploding gradients
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
