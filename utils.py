@@ -64,6 +64,14 @@ def SNR_to_noise(snr):
 
     return noise_std
 
+def PowerNormalize(x):
+    x_square = torch.mul(x, x)
+    power = torch.mean(x_square).sqrt()
+    if power > 1:
+        x = torch.div(x, power)
+
+    return x
+
 def subsequent_mask(size):
     """
     Mask out subsequent positions.
@@ -98,7 +106,7 @@ def loss_function(x, trg, padding_idx, criterion):
     # Return average loss over non-padding positions
     return loss.mean()
 
-# 3GPP Channel power_normalize function
+# 3GPP Channel PowerNormalize function
 def power_normalize(signal):
     """Normalize signal power to unit average power."""
     power = torch.mean(torch.abs(signal) ** 2)
@@ -476,7 +484,7 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None
     # encoder + channel encoder
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = power_normalize(channel_enc_output)
+    Tx_sig = PowerNormalize(channel_enc_output)
 
     # Channel transmission
     if channel == 'AWGN':
@@ -537,7 +545,7 @@ def train_mi(model, mi_net, src, n_var, padding_idx, opt, channel, iteration=0):
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
 
-    Tx_sig = power_normalize(channel_enc_output)
+    Tx_sig = PowerNormalize(channel_enc_output)
     if channel == 'AWGN':
         Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
     elif channel == 'Rayleigh':
@@ -585,7 +593,7 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
         enc_output = model.encoder(src, src_mask)
         channel_enc_output = model.channel_encoder(enc_output)
-        Tx_sig = power_normalize(channel_enc_output)
+        Tx_sig = PowerNormalize(channel_enc_output)
 
         if channel == 'AWGN':
             Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
@@ -658,7 +666,7 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
     # Encoder and channel encoding (same as train_step)
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = power_normalize(
+    Tx_sig = PowerNormalize(
         channel_enc_output)  # Assuming power_normalize is defined
 
     # Channel simulation
