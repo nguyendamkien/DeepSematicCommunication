@@ -1076,3 +1076,173 @@ def plot_bleu_vs_snr(data_dict,
     plt.savefig('figure1.png')  # Ensure unique filename if needed
     plt.show()
     plt.close()
+
+
+def train_step_adv(model, src, trg, n_var, pad, opt, criterion, channel,
+                   epsilon=0.1, lambda_adv=0.3, mi_net=None):
+    """
+    Huấn luyện đối kháng DeepSC + FGM (Goodfellow et al., 2015).
+
+    Công thức (paper Eq. 2):
+        L_total = L_clean + lambda_adv * L_adv
+        r_adv   = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
+
+    Lưu ý quan trọng từ paper:
+        - Gradient KHÔNG được backprop qua quá trình tạo r_adv (stop-gradient).
+        - Perturbation theo CHIỀU DƯƠNG gradient (tăng loss → worst-case).
+        - θ̂ là constant khi tính r_adv.
+
+    Args:
+        model      : DeepSC model
+        src        : Source token ids [batch, seq_len]
+        trg        : Target token ids [batch, seq_len]
+        n_var      : Channel noise std
+        pad        : Padding token index
+        opt        : Optimizer
+        criterion  : CrossEntropyLoss (reduction='none')
+        channel    : 'AWGN' | 'Rayleigh' | 'Rician' | 'TimeVaryingRician' | '3GPP'
+        epsilon    : FGM perturbation scale (default 0.1)
+        lambda_adv : Weight for adversarial loss (default 0.3)
+        mi_net     : Optional MINE network for mutual information regularization
+
+    Returns:
+        loss_total (float), loss_clean (float), loss_adv (float), snr (float)
+    """
+    model.train()
+
+    trg_inp  = trg[:, :-1]
+    trg_real = trg[:, 1:]
+    channels = Channels()
+
+    # ── 3GPP channel setup ─────────────────────────────────────────────────────
+    if channel == '3GPP':
+        distance = random.uniform(10, 2000)
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5, tx_power_dB=23, seed=None,
+            snr_db=random.uniform(0, 20),
+        )
+
+    # ── Masks ──────────────────────────────────────────────────────────────────
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+    # Padding mask để bỏ qua <PAD> khi tính gradient
+    pad_mask = (src != pad).float()  # [batch, seq_len]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BƯỚC 1: CLEAN FORWARD PASS
+    # ══════════════════════════════════════════════════════════════════════════
+    # Tạo embedding với positional encoding, bật gradient để tính FGM
+    x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+    x_embed = model.encoder.pos_encoding(x_embed)
+    x_embed.requires_grad_(True)
+
+    # Encoder: dùng embedding đã được bật grad thay vì tính lại từ token ids
+    enc_output = x_embed
+    for enc_layer in model.encoder.enc_layers:
+        enc_output = enc_layer(enc_output, src_mask)
+
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    # Channel
+    Rx_sig, snr = _apply_channel(channels, channel, Tx_sig, n_var,
+                                 deepsc_channel if channel == '3GPP' else None)
+
+    # Decoder
+    channel_dec_output = model.channel_decoder(Rx_sig)
+    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
+    pred = model.dense(dec_output)
+    ntokens = pred.size(-1)
+
+    # Loss clean
+    loss_clean = loss_function(pred.contiguous().view(-1, ntokens),
+                               trg_real.contiguous().view(-1), pad, criterion)
+
+    # Optional: MI regularization trên clean pass
+    if mi_net is not None:
+        mi_net.eval()
+        joint, marginal = sample_batch(Tx_sig, Rx_sig)
+        mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
+        loss_clean = loss_clean - 0.0009 * mi_lb
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BƯỚC 2: TÍNH FGM PERTURBATION (stop-gradient theo paper)
+    # r_adv = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
+    # ══════════════════════════════════════════════════════════════════════════
+    # retain_graph=True vì loss_clean sẽ được dùng lại trong loss_total.backward()
+    grad = torch.autograd.grad(
+        loss_clean, x_embed,
+        retain_graph=True,
+        create_graph=False   # stop-gradient: không backprop qua quá trình tạo noise
+    )[0]
+
+    # Bỏ gradient tại vị trí <PAD> để không perturb token padding
+    grad = grad * pad_mask.unsqueeze(-1)  # [batch, seq_len, d_model]
+
+    # L2-normalize theo chiều embedding (per token), scale bằng epsilon
+    norm = torch.norm(grad, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+    r_adv = (epsilon * grad / norm).detach()  # detach → θ̂ constant
+
+    # Adversarial embedding
+    x_embed_adv = (x_embed + r_adv).detach().requires_grad_(False)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BƯỚC 3: ADVERSARIAL FORWARD PASS
+    # ══════════════════════════════════════════════════════════════════════════
+    enc_output_adv = x_embed_adv
+    for enc_layer in model.encoder.enc_layers:
+        enc_output_adv = enc_layer(enc_output_adv, src_mask)
+
+    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+    Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+    Rx_sig_adv, _ = _apply_channel(channels, channel, Tx_sig_adv, n_var,
+                                   deepsc_channel if channel == '3GPP' else None)
+
+    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+    dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask, src_mask)
+    pred_adv = model.dense(dec_output_adv)
+    ntokens_adv = pred_adv.size(-1)
+
+    loss_adv = loss_function(pred_adv.contiguous().view(-1, ntokens_adv),
+                             trg_real.contiguous().view(-1), pad, criterion)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BƯỚC 4: TỔNG LOSS + BACKWARD
+    # L_total = (1 - λ) · L_clean + λ · L_adv
+    # ══════════════════════════════════════════════════════════════════════════
+    loss_total = (1.0 - lambda_adv) * loss_clean + lambda_adv * loss_adv
+
+    opt.zero_grad()
+    loss_total.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    opt.step()
+
+    return loss_total.item(), loss_clean.item(), loss_adv.item(), snr
+
+
+def _apply_channel(channels, channel, Tx_sig, n_var, deepsc_channel=None):
+    """Helper: áp dụng channel và trả về (Rx_sig, snr)."""
+    if channel == 'AWGN':
+        return channels.AWGN(Tx_sig, n_var)
+    elif channel == 'Rayleigh':
+        return channels.Rayleigh(Tx_sig, n_var)
+    elif channel == 'Rician':
+        return channels.Rician(Tx_sig, n_var)
+    elif channel == 'TimeVaryingRician':
+        return channels.TimeVaryingRician(Tx_sig, n_var)
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "features must be even for complex symbols"
+        Tx_c = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_c = torch.complex(Tx_c[..., 0], Tx_c[..., 1])
+        Rx_c, rx_pow, noise_pow = deepsc_channel.apply_channel(Tx_c)
+        Rx_sig = torch.view_as_real(Rx_c).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(rx_pow / noise_pow) if noise_pow > 0 else -100.0
+        return Rx_sig, snr
+    else:
+        raise ValueError(f"Unknown channel: {channel}. "
+                         "Choose AWGN | Rayleigh | Rician | TimeVaryingRician | 3GPP")

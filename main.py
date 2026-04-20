@@ -16,7 +16,7 @@ from tqdm import tqdm
 from dataset import EurDataset, collate_pair_data
 from models.mutual_info import Mine
 from models.transceiver import DeepSC
-from utils import SNR_to_noise, train_step, val_step, initNetParams, \
+from utils import SNR_to_noise, train_step, train_step_adv, val_step, initNetParams, \
     SeqtoText, list_checkpoints, load_checkpoint, train_mi
 
 plt.ion() # Turn on interactive mode
@@ -45,6 +45,16 @@ parser.add_argument(
     default="start",
     help="Choose 'start' to train from scratch or 'resume' to continue from checkpoint"
 )
+parser.add_argument(
+    "--adv",
+    action="store_true",
+    default=False,
+    help="Enable FGM adversarial training (DeepSC + FGM)"
+)
+parser.add_argument("--epsilon",    default=0.1, type=float,
+                    help="FGM perturbation scale (default 0.1)")
+parser.add_argument("--lambda-adv", default=0.3, type=float,
+                    help="Adversarial loss weight (default 0.3)")
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 stop_training = False  # Global variable to control training interruption
@@ -74,16 +84,19 @@ def train(epoch, args, net, mi_net=None):
     # For TimeVaryingRician
     # noise_std_options = np.arange(0.045, 0.316, 0.010)
     epoch_loss = 0
+    epoch_loss_clean = 0
+    epoch_loss_adv = 0
     mi_bits_total = 0
     batch_count = 0
     snr_values = []
 
     for noise_sents, trg_sents, label_tensors in pbar:
         if stop_training:
-            return True, epoch_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
-                snr_values) if snr_values else 0, max(
-                snr_values) if snr_values else 0, sum(snr_values) / len(
-                snr_values) if snr_values else 0
+            return True, epoch_loss, epoch_loss_clean, epoch_loss_adv, \
+                   mi_bits_total / batch_count if batch_count > 0 else 0, \
+                   min(snr_values) if snr_values else 0, \
+                   max(snr_values) if snr_values else 0, \
+                   sum(snr_values) / len(snr_values) if snr_values else 0
         noise_sents = noise_sents.to(device)
         trg_sents = trg_sents.to(device)
         label_tensors = label_tensors.to(device)
@@ -91,33 +104,54 @@ def train(epoch, args, net, mi_net=None):
         # For original Channel
         noise_std = float(
             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
-        if mi_net is not None:
+
+        if args.adv:
+            # ── Adversarial training: DeepSC + FGM ────────────────────────────
+            loss_total, loss_clean, loss_adv, snr = train_step_adv(
+                net, noise_sents, trg_sents, noise_std, pad_idx,
+                optimizer, criterion, args.channel,
+                epsilon=args.epsilon, lambda_adv=args.lambda_adv,
+                mi_net=mi_net if mi_net is not None else None)
+            epoch_loss       += loss_total
+            epoch_loss_clean += loss_clean
+            epoch_loss_adv   += loss_adv
+            snr_values.append(snr)
+            pbar.set_description(
+                f'Epoch: {epoch+1}; [ADV] Total: {loss_total:.4f} '
+                f'| Clean: {loss_clean:.4f} | Adv: {loss_adv:.4f} | SNR: {snr:.2f}')
+        elif mi_net is not None:
+            # ── Standard training với MINE ─────────────────────────────────────
             mi_loss, mi_bits = train_mi(net, mi_net, noise_sents, 0.1, pad_idx,
                                         mi_opt, args.channel)
             loss_total, snr = train_step(net, noise_sents, trg_sents, 0.1, pad_idx,
-                                         optimizer, criterion, args.channel,
-                                         mi_net)
-            epoch_loss += loss_total
+                                         optimizer, criterion, args.channel, mi_net)
+            epoch_loss    += loss_total
             mi_bits_total += mi_bits
-            batch_count += 1
+            batch_count   += 1
             snr_values.append(snr)
             pbar.set_description(
-                f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
+                f'Epoch: {epoch+1}; Loss: {loss_total:.5f}; '
+                f'MI: {mi_bits:.4f} bits; SNR: {snr:.5f}')
         else:
-            loss_total, snr = train_step(net, noise_sents, trg_sents, noise_std, pad_idx,
-                                        optimizer, criterion, args.channel)
+            # ── Standard training ──────────────────────────────────────────────
+            loss_total, snr = train_step(net, noise_sents, trg_sents, noise_std,
+                                         pad_idx, optimizer, criterion, args.channel)
             epoch_loss += loss_total
             snr_values.append(snr)
             pbar.set_description(
-                f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
+                f'Epoch: {epoch+1}; Loss: {loss_total:.5f}; '
+                f'SNR: {snr:.5f}; Noise: {noise_std:.5f}')
 
     snr_min = min(snr_values) if snr_values else 0
     snr_max = max(snr_values) if snr_values else 0
     snr_avg = sum(snr_values) / len(snr_values) if snr_values else 0
 
-    avg_epoch_loss = epoch_loss / len(train_iterator)
+    avg_epoch_loss       = epoch_loss       / len(train_iterator)
+    avg_epoch_loss_clean = epoch_loss_clean / len(train_iterator)
+    avg_epoch_loss_adv   = epoch_loss_adv   / len(train_iterator)
     avg_mi_bits = mi_bits_total / batch_count if batch_count > 0 else 0
-    return False, avg_epoch_loss, avg_mi_bits, snr_min, snr_max, snr_avg
+    return False, avg_epoch_loss, avg_epoch_loss_clean, avg_epoch_loss_adv, \
+           avg_mi_bits, snr_min, snr_max, snr_avg
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
@@ -165,6 +199,7 @@ def validate(epoch, args, net, seq_to_text):
 
 # Function to save checkpoint for each epoch
 def save_checkpoint(epoch, avg_loss, epoch_train_loss,
+                    epoch_train_loss_clean, epoch_train_loss_adv,
                     avg_mi_bits, snr_min, snr_max, snr_avg):
     checkpoint_path = os.path.join(
         args.checkpoint_path,
@@ -180,6 +215,8 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss,
         # 'mi_opt_state_dict': mi_opt.state_dict(),
         'loss': avg_loss,
         'train_loss': epoch_train_loss,
+        'train_loss_clean': epoch_train_loss_clean,
+        'train_loss_adv': epoch_train_loss_adv,
         'mi_bits': avg_mi_bits,
         'snr_min': snr_min,
         'snr_max': snr_max,
@@ -268,18 +305,29 @@ if __name__ == '__main__':
     for epoch in range(start_epoch, args.epochs):
         start = time.time()
         # Training
-        interrupted, epoch_train_loss, avg_mi_bits, snr_min, snr_max, snr_avg = train(
+        interrupted, epoch_train_loss, epoch_train_loss_clean, epoch_train_loss_adv, \
+            avg_mi_bits, snr_min, snr_max, snr_avg = train(
             epoch, args, deepsc)
         if interrupted:
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")
             avg_loss = validate(epoch, args, deepsc, seq_to_text)
             save_checkpoint(epoch, avg_loss, epoch_train_loss,
+                epoch_train_loss_clean, epoch_train_loss_adv,
                 avg_mi_bits, snr_min, snr_max, snr_avg)
             break
 
         avg_loss = validate(epoch, args, deepsc, seq_to_text)
+
+        # In log epoch
+        mode_tag = '[ADV]' if args.adv else '[STD]'
+        print(f"\n{mode_tag} epoch {epoch+1} | train: {epoch_train_loss:.5f} "
+              f"| val: {avg_loss:.5f}"
+              + (f" | clean: {epoch_train_loss_clean:.5f} | adv: {epoch_train_loss_adv:.5f}"
+                 if args.adv else ""))
+
         save_checkpoint(epoch, avg_loss, epoch_train_loss,
+                epoch_train_loss_clean, epoch_train_loss_adv,
                 avg_mi_bits, snr_min, snr_max, snr_avg)
         
         print(f"GPU Utilization: {torch.cuda.utilization(0)}%")
