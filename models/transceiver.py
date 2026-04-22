@@ -230,7 +230,7 @@ class Encoder(nn.Module):
             [EncoderLayer(d_model, num_heads, dff, dropout)
              for _ in range(num_layers)])
         
-    def forward(self, x, src_mask):
+    def forward(self, x, src_mask, embed_input=None):
         """Pass the input (and mask) through each layer in turn."""
         """
         Input:
@@ -239,9 +239,12 @@ class Encoder(nn.Module):
         # the input size of x is [batch_size, seq_len]
         Output: [batch_size, seq_len, d_model]
         """
-        # the input size of x is [batch_size, seq_len]
-        x = self.embedding(x) * math.sqrt(self.d_model)
-        x = self.pos_encoding(x)
+
+        if embed_input is None:
+            x = self.embedding(x) * math.sqrt(self.d_model)
+            x = self.pos_encoding(x)
+        else:
+            x = embed_input
 
         for enc_layer in self.enc_layers:
             x = enc_layer(x, src_mask)
