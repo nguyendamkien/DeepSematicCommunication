@@ -98,11 +98,13 @@ def loss_function(x, trg, padding_idx, criterion):
     # Return average loss over non-padding positions
     return loss.mean()
 
-# 3GPP Channel power_normalize function
-def power_normalize(signal):
-    """Normalize signal power to unit average power."""
-    power = torch.mean(torch.abs(signal) ** 2)
-    return signal / torch.sqrt(power) if power > 0 else signal
+def power_normalize(x):
+    x_square = torch.mul(x, x)
+    power = torch.mean(x_square).sqrt()
+    if power > 1:
+        x = torch.div(x, power)
+
+    return x
 
 # DeepSC CHannel for 3GPP
 class DeepSCChannel:
@@ -1078,150 +1080,150 @@ def plot_bleu_vs_snr(data_dict,
     plt.close()
 
 
-def train_step_adv(model, src, trg, n_var, pad, opt, criterion, channel,
-                   epsilon=0.1, lambda_adv=0.3, mi_net=None):
-    """
-    Huấn luyện đối kháng DeepSC + FGM (Goodfellow et al., 2015).
+# def train_step_adv_old(model, src, trg, n_var, pad, opt, criterion, channel,
+#                    epsilon=0.01, lambda_adv=0.3, mi_net=None):
+#     """
+#     Huấn luyện đối kháng DeepSC + FGM (Goodfellow et al., 2015).
 
-    Công thức (paper Eq. 2):
-        L_total = L_clean + lambda_adv * L_adv
-        r_adv   = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
+#     Công thức (paper Eq. 2):
+#         L_total = L_clean + lambda_adv * L_adv
+#         r_adv   = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
 
-    Lưu ý quan trọng từ paper:
-        - Gradient KHÔNG được backprop qua quá trình tạo r_adv (stop-gradient).
-        - Perturbation theo CHIỀU DƯƠNG gradient (tăng loss → worst-case).
-        - θ̂ là constant khi tính r_adv.
+#     Lưu ý quan trọng từ paper:
+#         - Gradient KHÔNG được backprop qua quá trình tạo r_adv (stop-gradient).
+#         - Perturbation theo CHIỀU DƯƠNG gradient (tăng loss → worst-case).
+#         - θ̂ là constant khi tính r_adv.
 
-    Args:
-        model      : DeepSC model
-        src        : Source token ids [batch, seq_len]
-        trg        : Target token ids [batch, seq_len]
-        n_var      : Channel noise std
-        pad        : Padding token index
-        opt        : Optimizer
-        criterion  : CrossEntropyLoss (reduction='none')
-        channel    : 'AWGN' | 'Rayleigh' | 'Rician' | 'TimeVaryingRician' | '3GPP'
-        epsilon    : FGM perturbation scale (default 0.1)
-        lambda_adv : Weight for adversarial loss (default 0.3)
-        mi_net     : Optional MINE network for mutual information regularization
+#     Args:
+#         model      : DeepSC model
+#         src        : Source token ids [batch, seq_len]
+#         trg        : Target token ids [batch, seq_len]
+#         n_var      : Channel noise std
+#         pad        : Padding token index
+#         opt        : Optimizer
+#         criterion  : CrossEntropyLoss (reduction='none')
+#         channel    : 'AWGN' | 'Rayleigh' | 'Rician' | 'TimeVaryingRician' | '3GPP'
+#         epsilon    : FGM perturbation scale (default 0.1)
+#         lambda_adv : Weight for adversarial loss (default 0.3)
+#         mi_net     : Optional MINE network for mutual information regularization
 
-    Returns:
-        loss_total (float), loss_clean (float), loss_adv (float), snr (float)
-    """
-    model.train()
+#     Returns:
+#         loss_total (float), loss_clean (float), loss_adv (float), snr (float)
+#     """
+#     model.train()
 
-    trg_inp  = trg[:, :-1]
-    trg_real = trg[:, 1:]
-    channels = Channels()
+#     trg_inp  = trg[:, :-1]
+#     trg_real = trg[:, 1:]
+#     channels = Channels()
 
-    # ── 3GPP channel setup ─────────────────────────────────────────────────────
-    if channel == '3GPP':
-        distance = random.uniform(10, 2000)
-        deepsc_channel = DeepSCChannel(
-            scenario='UMa',
-            tx_pos=(0, 0, 25),
-            rx_pos=(distance, 0, 1.5),
-            fc=3.5, tx_power_dB=23, seed=None,
-            snr_db=random.uniform(0, 20),
-        )
+#     # ── 3GPP channel setup ─────────────────────────────────────────────────────
+#     if channel == '3GPP':
+#         distance = random.uniform(10, 2000)
+#         deepsc_channel = DeepSCChannel(
+#             scenario='UMa',
+#             tx_pos=(0, 0, 25),
+#             rx_pos=(distance, 0, 1.5),
+#             fc=3.5, tx_power_dB=23, seed=None,
+#             snr_db=random.uniform(0, 20),
+#         )
 
-    # ── Masks ──────────────────────────────────────────────────────────────────
-    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+#     # ── Masks ──────────────────────────────────────────────────────────────────
+#     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
 
-    # Padding mask để bỏ qua <PAD> khi tính gradient
-    pad_mask = (src != pad).float()  # [batch, seq_len]
+#     # Padding mask để bỏ qua <PAD> khi tính gradient
+#     pad_mask = (src != pad).float()  # [batch, seq_len]
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # BƯỚC 1: CLEAN FORWARD PASS
-    # ══════════════════════════════════════════════════════════════════════════
-    # Tạo embedding với positional encoding, bật gradient để tính FGM
-    x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
-    x_embed = model.encoder.pos_encoding(x_embed)
-    x_embed.requires_grad_(True)
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # BƯỚC 1: CLEAN FORWARD PASS
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # Tạo embedding với positional encoding, bật gradient để tính FGM
+#     x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+#     x_embed = model.encoder.pos_encoding(x_embed)
+#     x_embed.requires_grad_(True)
 
-    # Encoder: dùng embedding đã được bật grad thay vì tính lại từ token ids
-    enc_output = x_embed
-    for enc_layer in model.encoder.enc_layers:
-        enc_output = enc_layer(enc_output, src_mask)
+#     # Encoder: dùng embedding đã được bật grad thay vì tính lại từ token ids
+#     enc_output = x_embed
+#     for enc_layer in model.encoder.enc_layers:
+#         enc_output = enc_layer(enc_output, src_mask)
 
-    channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = power_normalize(channel_enc_output)
+#     channel_enc_output = model.channel_encoder(enc_output)
+#     Tx_sig = power_normalize(channel_enc_output)
 
-    # Channel
-    Rx_sig, snr = _apply_channel(channels, channel, Tx_sig, n_var,
-                                 deepsc_channel if channel == '3GPP' else None)
+#     # Channel
+#     Rx_sig, snr = _apply_channel(channels, channel, Tx_sig, n_var,
+#                                  deepsc_channel if channel == '3GPP' else None)
 
-    # Decoder
-    channel_dec_output = model.channel_decoder(Rx_sig)
-    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
-    pred = model.dense(dec_output)
-    ntokens = pred.size(-1)
+#     # Decoder
+#     channel_dec_output = model.channel_decoder(Rx_sig)
+#     dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
+#     pred = model.dense(dec_output)
+#     ntokens = pred.size(-1)
 
-    # Loss clean
-    loss_clean = loss_function(pred.contiguous().view(-1, ntokens),
-                               trg_real.contiguous().view(-1), pad, criterion)
+#     # Loss clean
+#     loss_clean = loss_function(pred.contiguous().view(-1, ntokens),
+#                                trg_real.contiguous().view(-1), pad, criterion)
 
-    # Optional: MI regularization trên clean pass
-    if mi_net is not None:
-        mi_net.eval()
-        joint, marginal = sample_batch(Tx_sig, Rx_sig)
-        mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
-        loss_clean = loss_clean - 0.0009 * mi_lb
+#     # Optional: MI regularization trên clean pass
+#     if mi_net is not None:
+#         mi_net.eval()
+#         joint, marginal = sample_batch(Tx_sig, Rx_sig)
+#         mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
+#         loss_clean = loss_clean - 0.0009 * mi_lb
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # BƯỚC 2: TÍNH FGM PERTURBATION (stop-gradient theo paper)
-    # r_adv = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
-    # ══════════════════════════════════════════════════════════════════════════
-    # retain_graph=True vì loss_clean sẽ được dùng lại trong loss_total.backward()
-    grad = torch.autograd.grad(
-        loss_clean, x_embed,
-        retain_graph=True,
-        create_graph=False   # stop-gradient: không backprop qua quá trình tạo noise
-    )[0]
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # BƯỚC 2: TÍNH FGM PERTURBATION (stop-gradient theo paper)
+#     # r_adv = ε · ∇_{x_embed} L_clean / ‖∇_{x_embed} L_clean‖₂
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # retain_graph=True vì loss_clean sẽ được dùng lại trong loss_total.backward()
+#     grad = torch.autograd.grad(
+#         loss_clean, x_embed,
+#         retain_graph=True,
+#         create_graph=False   # stop-gradient: không backprop qua quá trình tạo noise
+#     )[0]
 
-    # Bỏ gradient tại vị trí <PAD> để không perturb token padding
-    grad = grad * pad_mask.unsqueeze(-1)  # [batch, seq_len, d_model]
+#     # Bỏ gradient tại vị trí <PAD> để không perturb token padding
+#     grad = grad * pad_mask.unsqueeze(-1)  # [batch, seq_len, d_model]
 
-    # L2-normalize theo chiều embedding (per token), scale bằng epsilon
-    norm = torch.norm(grad, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
-    r_adv = (epsilon * grad / norm).detach()  # detach → θ̂ constant
+#     # L2-normalize theo chiều embedding (per token), scale bằng epsilon
+#     norm = torch.norm(grad, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+#     r_adv = (epsilon * grad / norm).detach()  # detach → θ̂ constant
 
-    # Adversarial embedding
-    x_embed_adv = (x_embed + r_adv).detach().requires_grad_(False)
+#     # Adversarial embedding
+#     x_embed_adv = (x_embed + r_adv).detach().requires_grad_(False)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # BƯỚC 3: ADVERSARIAL FORWARD PASS
-    # ══════════════════════════════════════════════════════════════════════════
-    enc_output_adv = x_embed_adv
-    for enc_layer in model.encoder.enc_layers:
-        enc_output_adv = enc_layer(enc_output_adv, src_mask)
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # BƯỚC 3: ADVERSARIAL FORWARD PASS
+#     # ══════════════════════════════════════════════════════════════════════════
+#     enc_output_adv = x_embed_adv
+#     for enc_layer in model.encoder.enc_layers:
+#         enc_output_adv = enc_layer(enc_output_adv, src_mask)
 
-    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
-    Tx_sig_adv = power_normalize(channel_enc_output_adv)
+#     channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+#     Tx_sig_adv = power_normalize(channel_enc_output_adv)
 
-    Rx_sig_adv, _ = _apply_channel(channels, channel, Tx_sig_adv, n_var,
-                                   deepsc_channel if channel == '3GPP' else None)
+#     Rx_sig_adv, _ = _apply_channel(channels, channel, Tx_sig_adv, n_var,
+#                                    deepsc_channel if channel == '3GPP' else None)
 
-    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
-    dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask, src_mask)
-    pred_adv = model.dense(dec_output_adv)
-    ntokens_adv = pred_adv.size(-1)
+#     channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+#     dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask, src_mask)
+#     pred_adv = model.dense(dec_output_adv)
+#     ntokens_adv = pred_adv.size(-1)
 
-    loss_adv = loss_function(pred_adv.contiguous().view(-1, ntokens_adv),
-                             trg_real.contiguous().view(-1), pad, criterion)
+#     loss_adv = loss_function(pred_adv.contiguous().view(-1, ntokens_adv),
+#                              trg_real.contiguous().view(-1), pad, criterion)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # BƯỚC 4: TỔNG LOSS + BACKWARD
-    # L_total = (1 - λ) · L_clean + λ · L_adv
-    # ══════════════════════════════════════════════════════════════════════════
-    loss_total = (1.0 - lambda_adv) * loss_clean + lambda_adv * loss_adv
+#     # ══════════════════════════════════════════════════════════════════════════
+#     # BƯỚC 4: TỔNG LOSS + BACKWARD
+#     # L_total = (1 - λ) · L_clean + λ · L_adv
+#     # ══════════════════════════════════════════════════════════════════════════
+#     loss_total = (1.0 - lambda_adv) * loss_clean + lambda_adv * loss_adv
 
-    opt.zero_grad()
-    loss_total.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    opt.step()
+#     opt.zero_grad()
+#     loss_total.backward()
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#     opt.step()
 
-    return loss_total.item(), loss_clean.item(), loss_adv.item(), snr
+#     return loss_total.item(), loss_clean.item(), loss_adv.item(), snr
 
 
 def _apply_channel(channels, channel, Tx_sig, n_var, deepsc_channel=None):
@@ -1246,3 +1248,204 @@ def _apply_channel(channels, channel, Tx_sig, n_var, deepsc_channel=None):
     else:
         raise ValueError(f"Unknown channel: {channel}. "
                          "Choose AWGN | Rayleigh | Rician | TimeVaryingRician | 3GPP")
+
+# def train_step_adv(model, src, trg, n_var, pad, opt, criterion, channel,
+#                      epsilon=0.5, lambda_adv=0.5, mi_net=None):
+#     print(epsilon)
+#     model.train()
+
+#     trg_inp  = trg[:, :-1]
+#     trg_real = trg[:, 1:]
+
+#     channels = Channels()
+
+#     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+#     pad_mask = (src != pad).float()
+
+#     # =========================================================
+#     # BƯỚC 1: CLEAN FORWARD + BACKWARD (để lấy gradient)
+#     # =========================================================
+#     x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+#     x_embed = model.encoder.pos_encoding(x_embed)
+
+#     x_embed.requires_grad_(True)
+#     # x_embed.retain_grad() 
+
+#     # Forward
+#     enc_output = x_embed
+#     enc_output = model.encoder(src, src_mask, embed_input=x_embed)
+
+#     channel_enc_output = model.channel_encoder(enc_output)
+#     Tx_sig = power_normalize(channel_enc_output)
+
+#     Rx_sig, snr = _apply_channel(channels, channel, Tx_sig, n_var)
+
+#     channel_dec_output = model.channel_decoder(Rx_sig)
+#     dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask, src_mask)
+#     pred = model.dense(dec_output)
+
+#     ntokens = pred.size(-1)
+
+#     loss_clean = loss_function(
+#         pred.contiguous().view(-1, ntokens),
+#         trg_real.contiguous().view(-1),
+#         pad, criterion
+#     )
+
+#     # 🔥 BACKWARD để lấy gradient (giống Chainer)
+#     # model.zero_grad()
+#     # loss_clean.backward(retain_graph=True)
+
+#     # # =========================================================
+#     # # BƯỚC 2: LẤY GRADIENT → tạo d
+#     # # =========================================================
+#     # d = x_embed.grad.detach()
+
+#     grad = torch.autograd.grad(loss_clean, x_embed, retain_graph=True)[0]
+
+#     d = grad.detach()
+
+#     # normalize per token vector
+#     norm = d.norm(p=2, dim=-1, keepdim=True)
+#     d = d / (norm + 1e-8)
+
+#     # scale epsilon
+#     d = epsilon * d
+
+#     # apply mask cuối cùng
+#     d = d * pad_mask.unsqueeze(-1)
+
+#     print("grad mean:", grad.abs().mean().item())
+#     print("d mean:", d.abs().mean().item())
+
+#     # =========================================================
+#     # BƯỚC 3: FORWARD ADVERSARIAL
+#     # =========================================================
+#     x_embed_adv = x_embed.detach() + d
+
+#     enc_output_adv = x_embed_adv
+#     enc_output_adv = model.encoder(src, src_mask, embed_input=x_embed_adv)
+
+
+#     channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+#     Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+#     Rx_sig_adv, _ = _apply_channel(channels, channel, Tx_sig_adv, n_var)
+
+#     channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+#     dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv,
+#                                   look_ahead_mask, src_mask)
+
+#     pred_adv = model.dense(dec_output_adv)
+
+#     loss_adv = loss_function(
+#         pred_adv.contiguous().view(-1, ntokens),
+#         trg_real.contiguous().view(-1),
+#         pad, criterion
+#     )
+
+#     # =========================================================
+#     # BƯỚC 4: TOTAL LOSS + UPDATE
+#     # =========================================================
+#     loss_total = (1 - lambda_adv) * loss_clean + lambda_adv * loss_adv
+
+#     model.zero_grad()
+#     loss_total.backward()
+
+#     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+#     opt.step()
+
+#     return loss_total.item(), loss_clean.item(), loss_adv.item(), snr
+
+def train_step_adv(model, src, trg, n_var, pad, opt, criterion, channel,
+                   epsilon=0.2, lambda_adv=0.5, mi_net=None):
+
+    model.train()
+    model.zero_grad(set_to_none=True)
+
+    trg_inp  = trg[:, :-1]
+    trg_real = trg[:, 1:]
+
+    channels = Channels()
+
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+    pad_mask = (src != pad).float()
+
+    # =========================================================
+    # CLEAN FORWARD
+    # =========================================================
+    x_embed = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+    x_embed = model.encoder.pos_encoding(x_embed)
+    x_embed.requires_grad_(True)
+
+    enc_output = model.encoder(src, src_mask, embed_input=x_embed)
+
+    channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
+
+    Rx_sig, snr = _apply_channel(channels, channel, Tx_sig, n_var)
+
+    channel_dec_output = model.channel_decoder(Rx_sig)
+    dec_output = model.decoder(trg_inp, channel_dec_output,
+                               look_ahead_mask, src_mask)
+
+    pred = model.dense(dec_output)
+
+    ntokens = pred.size(-1)
+
+    loss_clean = loss_function(
+        pred.contiguous().view(-1, ntokens),
+        trg_real.contiguous().view(-1),
+        pad, criterion
+    )
+
+    # =========================================================
+    # BƯỚC 2: FGM — công thức (9) trong paper
+    # NA = epsilon * grad / ||grad||_2
+    # =========================================================
+    grad = torch.autograd.grad(loss_clean, x_embed, retain_graph=True)[0]
+    # grad shape: [B, seq_len, d_model]
+
+    # L2-normalize theo từng token (đúng công thức paper)
+    grad_norm = grad.norm(dim=-1, keepdim=True)          # [B, seq_len, 1]
+    NA = epsilon * grad / (grad_norm + 1e-8)             # [B, seq_len, d_model]
+
+    # Mask padding tokens — không perturb vị trí pad
+    NA = NA * pad_mask.unsqueeze(-1)                     # [B, seq_len, d_model]
+
+    # =========================================================
+    # BƯỚC 3: ADVERSARIAL FORWARD với X_embed + NA
+    # =========================================================
+    x_embed_adv = x_embed.detach() + NA.detach()
+
+    enc_output_adv = model.encoder(src, src_mask, embed_input=x_embed_adv)
+
+    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+    Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+    Rx_sig_adv, _ = _apply_channel(channels, channel, Tx_sig_adv, n_var)
+
+    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+    dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv,
+                                   look_ahead_mask, src_mask)
+
+    pred_adv = model.dense(dec_output_adv)
+
+    loss_adv = loss_function(
+        pred_adv.contiguous().view(-1, ntokens),
+        trg_real.contiguous().view(-1),
+        pad, criterion
+    )
+
+    # =========================================================
+    # TOTAL LOSS
+    # =========================================================
+    loss_total = (1 - lambda_adv) * loss_clean + lambda_adv * loss_adv
+
+    opt.zero_grad(set_to_none=True)
+    loss_total.backward()
+
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    opt.step()
+
+    return loss_total.item(), loss_clean.item(), loss_adv.item(), snr

@@ -45,16 +45,12 @@ parser.add_argument(
     default="start",
     help="Choose 'start' to train from scratch or 'resume' to continue from checkpoint"
 )
-parser.add_argument(
-    "--adv",
-    action="store_true",
-    default=False,
-    help="Enable FGM adversarial training (DeepSC + FGM)"
-)
-parser.add_argument("--epsilon",    default=0.1, type=float,
-                    help="FGM perturbation scale (default 0.1)")
-parser.add_argument("--lambda-adv", default=0.3, type=float,
-                    help="Adversarial loss weight (default 0.3)")
+parser.add_argument("--epsilon",    default=0.05, type=float,
+                    help="FGM perturbation scale (default 0.005)")
+parser.add_argument("--lambda-adv", default=0.5, type=float,
+                    help="Adversarial loss weight (default 0.5)")
+parser.add_argument("--warmup-epochs", default=5, type=int,
+                    help="Số epoch huấn luyện clean (không đối kháng) trước khi bật ADV (default 4)")
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 stop_training = False  # Global variable to control training interruption
@@ -73,7 +69,7 @@ def setup_seed(seed):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
 
-# Training funtion
+# Training function (2-phase: warmup clean → adversarial)
 def train(epoch, args, net, mi_net=None):
     global stop_training
     train_eur = EurDataset('train')
@@ -90,6 +86,20 @@ def train(epoch, args, net, mi_net=None):
     batch_count = 0
     snr_values = []
 
+    # Xác định chế độ huấn luyện dựa theo epoch hiện tại
+    use_adv = epoch >= args.warmup_epochs
+
+    # Tăng dần lambda_adv từ 0.1 → args.lambda_adv
+    if use_adv:
+        adv_epochs_done = epoch - args.warmup_epochs
+        total_adv_epochs = max(1, args.epochs - args.warmup_epochs)
+        ramp = min(1.0, adv_epochs_done / max(1, total_adv_epochs * 0.3))
+        lambda_adv = 0.1 + (args.lambda_adv - 0.1) * ramp
+    else:
+        lambda_adv = 0.0
+
+    phase_label = f"ADV(λ={lambda_adv:.2f})" if use_adv else "CLEAN"
+
     for noise_sents, trg_sents, label_tensors in pbar:
         if stop_training:
             return True, epoch_loss, epoch_loss_clean, epoch_loss_adv, \
@@ -105,42 +115,30 @@ def train(epoch, args, net, mi_net=None):
         noise_std = float(
             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
 
-        if args.adv:
-            # ── Adversarial training: DeepSC + FGM ────────────────────────────
+        if use_adv:
+            # ── Epoch >= warmup_epochs: Adversarial training (DeepSC + FGM) ──
             loss_total, loss_clean, loss_adv, snr = train_step_adv(
                 net, noise_sents, trg_sents, noise_std, pad_idx,
                 optimizer, criterion, args.channel,
-                epsilon=args.epsilon, lambda_adv=args.lambda_adv,
+                epsilon=args.epsilon, lambda_adv=lambda_adv,
                 mi_net=mi_net if mi_net is not None else None)
-            epoch_loss       += loss_total
-            epoch_loss_clean += loss_clean
-            epoch_loss_adv   += loss_adv
-            snr_values.append(snr)
             pbar.set_description(
-                f'Epoch: {epoch+1}; [ADV] Total: {loss_total:.4f} '
+                f'Epoch: {epoch+1}; [{phase_label}] Total: {loss_total:.4f} '
                 f'| Clean: {loss_clean:.4f} | Adv: {loss_adv:.4f} | SNR: {snr:.2f}')
-        elif mi_net is not None:
-            # ── Standard training với MINE ─────────────────────────────────────
-            mi_loss, mi_bits = train_mi(net, mi_net, noise_sents, 0.1, pad_idx,
-                                        mi_opt, args.channel)
-            loss_total, snr = train_step(net, noise_sents, trg_sents, 0.1, pad_idx,
-                                         optimizer, criterion, args.channel, mi_net)
-            epoch_loss    += loss_total
-            mi_bits_total += mi_bits
-            batch_count   += 1
-            snr_values.append(snr)
-            pbar.set_description(
-                f'Epoch: {epoch+1}; Loss: {loss_total:.5f}; '
-                f'MI: {mi_bits:.4f} bits; SNR: {snr:.5f}')
         else:
-            # ── Standard training ──────────────────────────────────────────────
-            loss_total, snr = train_step(net, noise_sents, trg_sents, noise_std,
-                                         pad_idx, optimizer, criterion, args.channel)
-            epoch_loss += loss_total
-            snr_values.append(snr)
+            # ── Epoch < warmup_epochs: Clean training (không đối kháng) ──
+            loss_total, snr = train_step(
+                net, noise_sents, trg_sents, noise_std, pad_idx,
+                optimizer, criterion, args.channel)
+            loss_clean = loss_total
+            loss_adv   = 0.0
             pbar.set_description(
-                f'Epoch: {epoch+1}; Loss: {loss_total:.5f}; '
-                f'SNR: {snr:.5f}; Noise: {noise_std:.5f}')
+                f'Epoch: {epoch+1}; [{phase_label}] Loss: {loss_total:.4f} | SNR: {snr:.2f}')
+
+        epoch_loss       += loss_total
+        epoch_loss_clean += loss_clean
+        epoch_loss_adv   += loss_adv
+        snr_values.append(snr)
 
     snr_min = min(snr_values) if snr_values else 0
     snr_max = max(snr_values) if snr_values else 0
@@ -221,6 +219,10 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss,
         'snr_min': snr_min,
         'snr_max': snr_max,
         'snr_avg': snr_avg,
+        # Lưu thêm để resume đúng phase warmup
+        'warmup_epochs': args.warmup_epochs,
+        'epsilon': args.epsilon,
+        'lambda_adv': args.lambda_adv,
     }, checkpoint_path)
 
     print(
@@ -283,11 +285,19 @@ if __name__ == '__main__':
         if checkpoint and checkpoint['epoch'] < args.epochs:
             start_epoch = checkpoint['epoch']
             deepsc.load_state_dict(checkpoint['model_state_dict'])
-            mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
+            # mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
-            print(
-                f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
+            # mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
+            # print(
+            #     f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
+            # Khôi phục đúng warmup phase nếu có trong checkpoint
+            if 'warmup_epochs' in checkpoint:
+                args.warmup_epochs = checkpoint['warmup_epochs']
+
+            print(f"Resumed epoch {start_epoch}, "
+                f"phase={'ADV' if start_epoch >= args.warmup_epochs else 'CLEAN'}, "
+                f"loss={checkpoint['loss']:.5f}")
+
         else:
             print(
                 "Cannot resume: Training completed or no valid checkpoint. Switching to 'start'.")
@@ -318,13 +328,6 @@ if __name__ == '__main__':
             break
 
         avg_loss = validate(epoch, args, deepsc, seq_to_text)
-
-        # In log epoch
-        mode_tag = '[ADV]' if args.adv else '[STD]'
-        print(f"\n{mode_tag} epoch {epoch+1} | train: {epoch_train_loss:.5f} "
-              f"| val: {avg_loss:.5f}"
-              + (f" | clean: {epoch_train_loss_clean:.5f} | adv: {epoch_train_loss_adv:.5f}"
-                 if args.adv else ""))
 
         save_checkpoint(epoch, avg_loss, epoch_train_loss,
                 epoch_train_loss_clean, epoch_train_loss_adv,
