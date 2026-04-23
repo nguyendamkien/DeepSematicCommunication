@@ -17,7 +17,7 @@ from dataset import EurDataset, collate_pair_data
 # from models.mutual_info import Mine
 from models.transceiver_calibration import CA_DeepSC
 from utils import SNR_to_noise, train_step_calibration, val_step_calibration, initNetParams, \
-    SeqtoText, list_checkpoints, load_checkpoint
+    SeqtoText, list_checkpoints, load_checkpoint, create_masks
 
 plt.ion() # Turn on interactive mode
 
@@ -64,6 +64,66 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 # Training funtion
+# def train(epoch, args, net, mi_net=None):
+#     global stop_training
+#     train_eur = EurDataset('train')
+#     train_iterator = DataLoader(train_eur, batch_size=args.batch_size,
+#                                 num_workers=0, pin_memory=True,
+#                                 collate_fn=collate_pair_data)
+#     pbar = tqdm(train_iterator)
+
+#     # For TimeVaryingRician
+#     # noise_std_options = np.arange(0.045, 0.316, 0.010)
+#     epoch_loss = 0
+#     epoch_bce_loss = 0
+#     mi_bits_total = 0
+#     batch_count = 0
+#     snr_values = []
+
+#     #noise_sent la cau goc, clean la target muon nhan
+#     for noise_sents, clean_sents, labels in pbar:
+#         if stop_training:
+#             return True, epoch_loss, epoch_bce_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
+#                 snr_values) if snr_values else 0, max(
+#                 snr_values) if snr_values else 0, sum(snr_values) / len(
+#                 snr_values) if snr_values else 0
+#         noise_sents = noise_sents.to(device)
+#         clean_sents = clean_sents.to(device)
+#         labels = labels.to(device)
+#         # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
+#         # For original Channel
+#         noise_std = float(
+#             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
+#         # if mi_net is not None:
+#         #     mi_loss, mi_bits = train_mi(net, mi_net, sents, 0.1, pad_idx,
+#         #                                 mi_opt, args.channel)
+#         #     loss_total, snr = train_step(net, sents, sents, 0.1, pad_idx,
+#         #                                  optimizer, criterion, args.channel,
+#         #                                  mi_net)
+#         #     epoch_loss += loss_total
+#         #     mi_bits_total += mi_bits
+#         #     batch_count += 1
+#         #     snr_values.append(snr)
+#         #     pbar.set_description(
+#         #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
+#         # else:
+#         loss_total, bce_loss_val, snr = train_step_calibration(net, noise_sents, clean_sents, labels, noise_std, pad_idx,
+#                                      optimizer, criterion, args.channel, bce_loss_fn)
+#         epoch_loss += loss_total
+#         epoch_bce_loss += bce_loss_val
+#         snr_values.append(snr)
+#         pbar.set_description(
+#             f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; BCE: {bce_loss_val:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
+
+#     snr_min = min(snr_values) if snr_values else 0
+#     snr_max = max(snr_values) if snr_values else 0
+#     snr_avg = sum(snr_values) / len(snr_values) if snr_values else 0
+
+#     avg_epoch_loss = epoch_loss / len(train_iterator)
+#     avg_epoch_bce_loss = epoch_bce_loss / len(train_iterator)
+#     avg_mi_bits = mi_bits_total / batch_count if batch_count > 0 else 0
+#     return False, avg_epoch_loss, avg_epoch_bce_loss, avg_mi_bits, snr_min, snr_max, snr_avg
+
 def train(epoch, args, net, mi_net=None):
     global stop_training
     train_eur = EurDataset('train')
@@ -71,61 +131,159 @@ def train(epoch, args, net, mi_net=None):
                                 num_workers=0, pin_memory=True,
                                 collate_fn=collate_pair_data)
     pbar = tqdm(train_iterator)
-    # For TimeVaryingRician
-    # noise_std_options = np.arange(0.045, 0.316, 0.010)
     epoch_loss = 0
     epoch_bce_loss = 0
     mi_bits_total = 0
     batch_count = 0
     snr_values = []
 
-    #noise_sent la cau goc, clean la target muon nhan
+    # # ===== DEBUG 3 MẪU =====
+    # net.eval()
+    # with torch.no_grad():
+    #     for noise_sents, clean_sents, labels in train_iterator:
+    #         noise_sents = noise_sents.to(device)
+    #         labels = labels.to(device)
+
+    #         src_mask, _ = create_masks(noise_sents, noise_sents[:, :-1], pad_idx)
+    #         _, pred_error_prob = net.encoder(noise_sents, src_mask)
+
+    #         # Chỉ in 3 mẫu đầu
+    #         for i in range(min(3, noise_sents.size(0))):
+    #             tokens = noise_sents[i].cpu().numpy()
+    #             probs  = pred_error_prob[i].cpu().numpy()
+    #             labs   = labels[i].cpu().numpy()
+
+    #             # Convert ids về words
+    #             words = [seq_to_text.reverse_word_map.get(t, '<UNK>') 
+    #                      for t in tokens if t != pad_idx]
+    #             probs = probs[:len(words)]
+    #             labs  = labs[:len(words)]
+
+    #             print(f"\n===== Mẫu {i+1} =====")
+    #             print(f"{'Token':<15} {'True':>6} {'Pred':>8} {'OK?':>5}")
+    #             print("-" * 40)
+    #             for w, l, p in zip(words, labs, probs):
+    #                 ok = "✅" if (p > 0.5) == (l == 1) else "❌"
+    #                 print(f"{w:<15} {int(l):>6} {p:>8.4f} {ok:>5}")
+
+    #             # Tóm tắt
+    #             pred_binary = (probs > 0.5).astype(float)
+    #             correct = (pred_binary == labs).mean()
+    #             sep = probs[labs == 1].mean() - probs[labs == 0].mean() \
+    #                   if labs.sum() > 0 else float('nan')
+    #             print(f"Accuracy: {correct:.3f} | Separation: {sep:.3f}")
+    #         break  # Chỉ debug 1 batch
+    # # ===== END DEBUG =====
+
+    # ===== DEBUG ATTENTION WEIGHTS =====
+    net.eval()
+    with torch.no_grad():
+        for noise_sents, clean_sents, labels in train_iterator:
+            noise_sents = noise_sents.to(device)
+            labels = labels.to(device)
+
+            src_mask, _ = create_masks(noise_sents, noise_sents[:, :-1], pad_idx)
+            _, pred_error_prob = net.encoder(noise_sents, src_mask)
+            layer = net.encoder.layers[-1].cattn
+
+
+            for i in range(min(1, noise_sents.size(0))):
+                tokens = noise_sents[i].cpu().numpy()
+                probs  = pred_error_prob[i].cpu().numpy()
+                labs   = labels[i].cpu().numpy()
+
+                words = [seq_to_text.reverse_word_map.get(t, '<UNK>') 
+                         for t in tokens if t != pad_idx]
+                probs = probs[:len(words)]
+                labs  = labs[:len(words)]
+
+                # ===== Calibration matrix C =====
+                P = torch.tensor(probs)
+                P_outer = torch.ger(P, P)       # [seq_len, seq_len]
+                C = 1 - P_outer                 # [seq_len, seq_len]
+                
+                # C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch,1,1,seq]
+                # C = C.expand(-1, 1, P.size(1), -1)   
+
+                print(f"\n===== Mẫu {i+1} =====")
+                print(f"{'Token':<15} {'True':>6} {'Pred':>8} {'Weight(1-P)':>12}")
+                print("-" * 50)
+                for w, l, p in zip(words, labs, probs):
+                    print(f"{w:<15} {int(l):>6} {p:>8.4f} {1-p:>12.4f}")
+
+                # C matrix — chỉ in diagonal và một số cặp quan trọng
+                print(f"\n--- Calibration C (token lỗi vs token đúng) ---")
+                error_indices = [j for j, l in enumerate(labs) if l == 1]
+                clean_indices = [j for j, l in enumerate(labs) if l == 0]
+
+                if error_indices and clean_indices:
+                    ei = error_indices[0]   # token lỗi đầu tiên
+                    ci = clean_indices[0]   # token đúng đầu tiên
+
+                    print(f"C[clean→clean] ({words[ci]}→{words[ci]}): {C[ci,ci]:.4f}")
+                    print(f"C[error→error] ({words[ei]}→{words[ei]}): {C[ei,ei]:.4f}")
+                    print(f"C[clean→error] ({words[ci]}→{words[ei]}): {C[ci,ei]:.4f}")
+                    print(f"C[error→clean] ({words[ei]}→{words[ci]}): {C[ei,ci]:.4f}")
+
+                    print(f"\n→ Token lỗi '{words[ei]}' attend đến token đúng '{words[ci]}'")
+                    print(f"  với weight {C[ei,ci]:.4f} (thấp = bị giảm ảnh hưởng)")
+
+                # So sánh attention scores trước và sau calibration
+                print(f"\n--- Ảnh hưởng C lên attention scores ---")
+                # Giả sử scores uniform trước calibration
+                seq_len = len(words)
+                
+                attn_before = layer.attn_before[i].mean(0)  # [seq, seq]
+                attn_after  = layer.attn_after[i].mean(0)
+
+                print(f"{'Token':<15} {'Attn trước':>12} {'Attn sau':>12} {'Thay đổi':>10}")
+                print("-" * 55)
+                for j, w in enumerate(words):
+                    before = attn_before[0, j].item()
+                    after  = attn_after[0, j].item()
+                    delta  = after - before
+                    flag   = "↓ lỗi" if labs[j] == 1 else ""
+                    print(f"{w:<15} {before:>12.4f} {after:>12.4f} {delta:>+10.4f} {flag}")
+
+            break
+
+    net.train()
     for noise_sents, clean_sents, labels in pbar:
         if stop_training:
-            return True, epoch_loss, epoch_bce_loss, mi_bits_total / batch_count if batch_count > 0 else 0, min(
-                snr_values) if snr_values else 0, max(
-                snr_values) if snr_values else 0, sum(snr_values) / len(
-                snr_values) if snr_values else 0
+            return True, epoch_loss, epoch_bce_loss, \
+                   mi_bits_total / batch_count if batch_count > 0 else 0, \
+                   min(snr_values) if snr_values else 0, \
+                   max(snr_values) if snr_values else 0, \
+                   sum(snr_values) / len(snr_values) if snr_values else 0
+
         noise_sents = noise_sents.to(device)
         clean_sents = clean_sents.to(device)
         labels = labels.to(device)
-        # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
-        # For original Channel
-        noise_std = float(
-            np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
-        # if mi_net is not None:
-        #     mi_loss, mi_bits = train_mi(net, mi_net, sents, 0.1, pad_idx,
-        #                                 mi_opt, args.channel)
-        #     loss_total, snr = train_step(net, sents, sents, 0.1, pad_idx,
-        #                                  optimizer, criterion, args.channel,
-        #                                  mi_net)
-        #     epoch_loss += loss_total
-        #     mi_bits_total += mi_bits
-        #     batch_count += 1
-        #     snr_values.append(snr)
-        #     pbar.set_description(
-        #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
-        # else:
-        loss_total, bce_loss_val, snr = train_step_calibration(net, noise_sents, clean_sents, labels, noise_std, pad_idx,
-                                     optimizer, criterion, args.channel, bce_loss_fn)
+
+        noise_std = float(np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
+        loss_total, bce_loss_val, snr = train_step_calibration(
+            net, noise_sents, clean_sents, labels, noise_std, pad_idx,
+            optimizer, criterion, args.channel, bce_loss_fn)
+
         epoch_loss += loss_total
         epoch_bce_loss += bce_loss_val
         snr_values.append(snr)
         pbar.set_description(
-            f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; BCE: {bce_loss_val:.5f}; SNR: {snr:.5f}; Noise Std: {noise_std:.5f}')
+            f'Epoch: {epoch+1}; Loss: {loss_total:.5f}; BCE: {bce_loss_val:.5f}; SNR: {snr:.5f}')
 
     snr_min = min(snr_values) if snr_values else 0
     snr_max = max(snr_values) if snr_values else 0
     snr_avg = sum(snr_values) / len(snr_values) if snr_values else 0
 
-    avg_epoch_loss = epoch_loss / len(train_iterator)
+    avg_epoch_loss    = epoch_loss / len(train_iterator)
     avg_epoch_bce_loss = epoch_bce_loss / len(train_iterator)
-    avg_mi_bits = mi_bits_total / batch_count if batch_count > 0 else 0
+    avg_mi_bits       = mi_bits_total / batch_count if batch_count > 0 else 0
+
     return False, avg_epoch_loss, avg_epoch_bce_loss, avg_mi_bits, snr_min, snr_max, snr_avg
 
 # Validation function
 def validate(epoch, args, net, seq_to_text):
-    val_eur = EurDataset('val')  # Load test dataset
+    val_eur = EurDataset('val')  # Load val dataset
     val_iterator = DataLoader(val_eur, batch_size=args.batch_size,
                                num_workers=0, pin_memory=True,
                                collate_fn=collate_pair_data)
@@ -157,6 +315,7 @@ def validate(epoch, args, net, seq_to_text):
             # print(f"Batch contains {sents.shape[0]} sentences")
             noise_sents = noise_sents.to(device)
             clean_sents = clean_sents.to(device)
+            labels = labels.to(device)
             loss, bce_loss_val, snr = val_step_calibration(net, noise_sents, clean_sents, labels, 0.1, pad_idx, criterion,
                                  args.channel, bce_loss_fn)
             # TimeVaryingRician

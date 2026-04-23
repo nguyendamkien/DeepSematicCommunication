@@ -99,10 +99,25 @@ def loss_function(x, trg, padding_idx, criterion):
     return loss.mean()
 
 # 3GPP Channel power_normalize function
-def power_normalize(signal):
-    """Normalize signal power to unit average power."""
-    power = torch.mean(torch.abs(signal) ** 2)
-    return signal / torch.sqrt(power) if power > 0 else signal
+#def power_normalize(signal):
+#    """Normalize signal power to unit average #power."""
+#    power = torch.mean(torch.abs(signal) ** 2)
+#    return signal / torch.sqrt(power) if power > 0 #else signal
+
+def power_normalize(signal, eps=1e-12):
+    """
+    Normalize signal power to unit average power per sample.
+    Args:
+        signal: Tensor of shape [B, L, d] or [B, ...]
+        eps: Small constant to prevent division by zero
+    Returns:
+        Normalized signal with average power 1 per sample
+    """
+    # Compute mean power per sample
+    power = torch.mean(torch.abs(signal) ** 2, dim=tuple(range(1, signal.dim())), keepdim=True)
+    # Normalize
+    normalized_signal = signal / torch.sqrt(power + eps)
+    return normalized_signal
 
 # DeepSC CHannel for 3GPP
 class DeepSCChannel:
@@ -1114,7 +1129,7 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Apply mask and average over non-padding positions
     loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-    loss = loss_ce + 0.1 * loss_bce
+    loss = loss_ce + 0.5 * loss_bce
     
     # backprop + update
     loss.backward()
@@ -1191,7 +1206,7 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
         # Apply mask and average over non-padding positions
         loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-        loss = loss_ce + 0.1 * loss_bce
+        loss = loss_ce + 0.5 * loss_bce
 
     return loss.item(), loss_bce.item(), snr
 

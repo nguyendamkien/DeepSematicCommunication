@@ -130,7 +130,7 @@ class CalibratedSelfAttention(nn.Module):
         "Implements Figure 2"
         if calibration is not None:
             # Same mask applied to all h heads.
-            calibration = calibration.unsqueeze(1)
+            calibration = calibration
         if mask is not None:
             # Same mask applied to all h heads.
             mask = mask.unsqueeze(1)
@@ -163,13 +163,20 @@ class CalibratedSelfAttention(nn.Module):
         d_k = query.size(-1)
         scores = torch.matmul(query, key.transpose(-2, -1)) \
                  / math.sqrt(d_k)
-        # print(mask.shape)
-        if calibration is not None:
-            scores = scores * calibration
+        scores_before = scores.clone()
+        
         if mask is not None:
             scores += (mask * -1e9)
             # attention weights
         p_attn = F.softmax(scores, dim=-1)
+        self.attn_before = F.softmax(scores_before, dim=-1)
+
+        # print(mask.shape)
+        if calibration is not None:
+            scores = scores * calibration
+
+        self.attn_after  = p_attn
+
         return torch.matmul(p_attn, value), p_attn
     
 """
@@ -272,6 +279,7 @@ class Encoder(nn.Module):
         x = self.pos_encoding(x)
 
         C = None
+        p = None
 
         for i, layer in enumerate(self.layers):
 
@@ -284,10 +292,13 @@ class Encoder(nn.Module):
             # P = [batch, seq]
             # P_outer = [batch, seq, seq]
             # C = [batch, seq, seq]
-            if i < len(self.layers) - 1:
-                P = self.detector(x) 
-                P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
-                C = 1 - P_outer
+            # P = self.detector(x) 
+            # P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
+            # C = 1 - P_outer
+            # Trong Encoder.forward()
+            P = self.detector(x)              # [batch, seq]
+            C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch, 1, 1, seq]
+            C = C.expand(-1, 1, P.size(1), -1)      # [batch, 1, seq, seq]
 
         return x, P
     

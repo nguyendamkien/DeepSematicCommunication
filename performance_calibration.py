@@ -142,7 +142,7 @@ def performance(args, SNR, net):
     bleu_score_1gram = BleuScore(1, 0, 0, 0)
 
     print("Loading test dataset...")
-    test_eur = EurDataset('test')
+    test_eur = EurDataset('20_percent_test')
     StoT = SeqtoText(token_to_idx, end_idx)
 
     final_bleu = []
