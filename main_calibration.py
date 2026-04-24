@@ -176,21 +176,109 @@ def train(epoch, args, net, mi_net=None):
     # # ===== END DEBUG =====
 
     # ===== DEBUG ATTENTION WEIGHTS =====
+    # net.eval()
+    # with torch.no_grad():
+    #     for noise_sents, clean_sents, labels in train_iterator:
+    #         noise_sents = noise_sents.to(device)
+    #         labels = labels.to(device)
+
+    #         src_mask, _ = create_masks(noise_sents, noise_sents[:, :-1], pad_idx)
+    #         _, pred_error_prob = net.encoder(noise_sents, src_mask)
+    #         layer = net.encoder.layers[-1].cattn
+
+
+    #         for i in range(min(1, noise_sents.size(0))):
+    #             tokens = noise_sents[i].cpu().numpy()
+    #             probs  = pred_error_prob[i].cpu().numpy()
+    #             labs   = labels[i].cpu().numpy()
+
+    #             words = [seq_to_text.reverse_word_map.get(t, '<UNK>') 
+    #                      for t in tokens if t != pad_idx]
+    #             probs = probs[:len(words)]
+    #             labs  = labs[:len(words)]
+
+    #             # ===== Calibration matrix C =====
+    #             P = torch.tensor(probs)
+    #             P_outer = torch.ger(P, P)       # [seq_len, seq_len]
+    #             C = 1 - P_outer                 # [seq_len, seq_len]
+                
+    #             # C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch,1,1,seq]
+    #             # C = C.expand(-1, 1, P.size(1), -1)   
+
+    #             print(f"\n===== Mẫu {i+1} =====")
+    #             print(f"{'Token':<15} {'True':>6} {'Pred':>8} {'Weight(1-P)':>12}")
+    #             print("-" * 50)
+    #             for w, l, p in zip(words, labs, probs):
+    #                 print(f"{w:<15} {int(l):>6} {p:>8.4f} {1-p:>12.4f}")
+
+    #             # C matrix — chỉ in diagonal và một số cặp quan trọng
+    #             print(f"\n--- Calibration C (token lỗi vs token đúng) ---")
+    #             error_indices = [j for j, l in enumerate(labs) if l == 1]
+    #             clean_indices = [j for j, l in enumerate(labs) if l == 0]
+
+    #             if error_indices and clean_indices:
+    #                 ei = error_indices[0]   # token lỗi đầu tiên
+    #                 ci = clean_indices[0]   # token đúng đầu tiên
+
+    #                 print(f"C[clean→clean] ({words[ci]}→{words[ci]}): {C[ci,ci]:.4f}")
+    #                 print(f"C[error→error] ({words[ei]}→{words[ei]}): {C[ei,ei]:.4f}")
+    #                 print(f"C[clean→error] ({words[ci]}→{words[ei]}): {C[ci,ei]:.4f}")
+    #                 print(f"C[error→clean] ({words[ei]}→{words[ci]}): {C[ei,ci]:.4f}")
+
+    #                 print(f"\n→ Token lỗi '{words[ei]}' attend đến token đúng '{words[ci]}'")
+    #                 print(f"  với weight {C[ei,ci]:.4f} (thấp = bị giảm ảnh hưởng)")
+
+    #             # So sánh attention scores trước và sau calibration
+    #             print(f"\n--- Ảnh hưởng C lên attention scores ---")
+    #             # Giả sử scores uniform trước calibration
+    #             seq_len = len(words)
+                
+    #             attn_before = layer.attn_before[i].mean(0)  # [seq, seq]
+    #             attn_after  = layer.attn_after[i].mean(0)
+
+    #             print(f"{'Token':<15} {'Attn trước':>12} {'Attn sau':>12} {'Thay đổi':>10}")
+    #             print("-" * 55)
+    #             for j, w in enumerate(words):
+    #                 before = attn_before[3, j].item()
+    #                 after  = attn_after[3, j].item()
+    #                 delta  = after - before
+    #                 flag   = "↓ lỗi" if labs[j] == 1 else ""
+    #                 print(f"{w:<15} {before:>12.4f} {after:>12.4f} {delta:>+10.4f} {flag}")
+
+    #             print(f"\n--- Ma trận attention đầy đủ [query × key] ---")
+    #             print(f"{'':>12}", end="")
+    #             for w in words:
+    #                 print(f"{w[:6]:>8}", end="")
+    #             print()
+    #             for r, rw in enumerate(words):
+    #                 flag = "←err" if labs[r]==1 else ""
+    #                 print(f"{rw[:11]:>11}{flag[:4]} │", end="")
+    #                 for c in range(len(words)):
+    #                     before = attn_before[r,c].item()
+    #                     after  = attn_after[r,c].item()
+    #                     delta  = after - before
+    #                     marker = "↓" if labs[c]==1 and abs(delta)>0.005 else " "
+    #                     print(f"{after:>7.4f}{marker}", end="")           
+    #         break
+
     net.eval()
     with torch.no_grad():
-        for noise_sents, clean_sents, labels in train_iterator:
+        for noise_sents, trg_sents, label_tensors in train_iterator:
             noise_sents = noise_sents.to(device)
-            labels = labels.to(device)
-
+            label_tensors = label_tensors.to(device)
             src_mask, _ = create_masks(noise_sents, noise_sents[:, :-1], pad_idx)
-            _, pred_error_prob = net.encoder(noise_sents, src_mask)
-            layer = net.encoder.layers[-1].cattn
 
+            enc_output, P = net.encoder(noise_sents, src_mask)
+
+            # Lấy layer cuối của CA-DeepSC
+            last_layer = net.encoder.layers[-1].cattn
+            pred_error_prob = P
+            # layer = net.encoder.layers[-1].cattn
 
             for i in range(min(1, noise_sents.size(0))):
                 tokens = noise_sents[i].cpu().numpy()
                 probs  = pred_error_prob[i].cpu().numpy()
-                labs   = labels[i].cpu().numpy()
+                labs   = label_tensors[i].cpu().numpy()
 
                 words = [seq_to_text.reverse_word_map.get(t, '<UNK>') 
                          for t in tokens if t != pad_idx]
@@ -198,8 +286,8 @@ def train(epoch, args, net, mi_net=None):
                 labs  = labs[:len(words)]
 
                 # ===== Calibration matrix C =====
-                P = torch.tensor(probs)
-                P_outer = torch.ger(P, P)       # [seq_len, seq_len]
+                P_pred = torch.tensor(probs)
+                P_outer = torch.ger(P_pred, P_pred)       # [seq_len, seq_len]
                 C = 1 - P_outer                 # [seq_len, seq_len]
                 
                 # C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch,1,1,seq]
@@ -233,20 +321,121 @@ def train(epoch, args, net, mi_net=None):
                 # Giả sử scores uniform trước calibration
                 seq_len = len(words)
                 
-                attn_before = layer.attn_before[i].mean(0)  # [seq, seq]
-                attn_after  = layer.attn_after[i].mean(0)
+                attn_before = last_layer.attn_before[i].mean(0)  # [seq, seq]
+                attn_after  = last_layer.attn_after[i].mean(0)
 
                 print(f"{'Token':<15} {'Attn trước':>12} {'Attn sau':>12} {'Thay đổi':>10}")
                 print("-" * 55)
                 for j, w in enumerate(words):
-                    before = attn_before[0, j].item()
-                    after  = attn_after[0, j].item()
+                    before = attn_before[3, j].item()
+                    after  = attn_after[3, j].item()
                     delta  = after - before
                     flag   = "↓ lỗi" if labs[j] == 1 else ""
                     print(f"{w:<15} {before:>12.4f} {after:>12.4f} {delta:>+10.4f} {flag}")
 
-            break
+                # print(f"\n--- Ma trận attention đầy đủ [query × key] ---")
+                # print(f"{'':>12}", end="")
+                # for w in words:
+                #     print(f"{w[:6]:>8}", end="")
+                # print()
+                # for r, rw in enumerate(words):
+                #     flag = "←err" if labs[r]==1 else ""
+                #     print(f"{rw[:11]:>11}{flag[:4]} │", end="")
+                #     for c in range(len(words)):
+                #         before = attn_before[r,c].item()
+                #         after  = attn_after[r,c].item()
+                #         delta  = after - before
+                #         marker = "↓" if labs[c]==1 and abs(delta)>0.005 else " "
+                #         print(f"{after:>7.4f}{marker}", end="")  
 
+            print("\n" + "=" * 65)
+            i = 0  # câu đầu tiên
+            tokens = noise_sents[i].cpu().numpy()
+            words = [seq_to_text.reverse_word_map.get(int(t), '<UNK>')
+                    for t in tokens if int(t) != pad_idx]
+            seq_len = len(words)
+
+            def print_matrix(mat, row_labels, col_labels, title, fmt=".3f"):
+                """In ma trận dạng ASCII với shade ký tự"""
+                col_w = 9
+                print(f"\n{'='*65}")
+                print(f"  {title}")
+                print(f"  shape={list(mat.shape)}  "
+                      f"std={mat.std().item():.5f}  "
+                      f"mean={mat.mean().item():.5f}")
+                print(f"{'='*65}")
+                print(f"{'':>12}", end="")
+                for w in col_labels:
+                    print(f"{w[:col_w-1]:>{col_w}}", end="")
+                print()
+                print(f"{'':>12}" + "─"*(col_w*len(col_labels)))
+
+                mx = mat.abs().max().item() + 1e-9
+                shades = ["   ", "░░░", "▒▒▒", "▓▓▓", "███"]
+
+                for r, rw in enumerate(row_labels):
+                    print(f"{rw[:11]:>11} │", end="")
+                    row_sum = 0
+                    for c in range(len(col_labels)):
+                        v = mat[r, c].item()
+                        row_sum += v
+                        lvl = min(4, int(abs(v) / mx * 4.99))
+                        cell = f"{shades[lvl]}{v:{fmt}}"
+                        print(f" {cell}"[:col_w], end="")
+                    print(f"  Σ={row_sum:.3f}")
+                print(f"{'':>12}" + "─"*(col_w*len(col_labels)))
+
+            # ── Ma trận 1: p_attn TRƯỚC calibration ─────────────────────
+            # attn_before = last_layer.attn_before[i].mean(0)[:seq_len, :seq_len].cpu()
+            # print_matrix(attn_before, words, words,
+            #             "p_attn BEFORE calibration = softmax(QKᵀ/√dk)")
+
+            # ── Ma trận 2: p_attn SAU calibration ────────────────────────
+            # attn_after = last_layer.attn_after[i].mean(0)[:seq_len, :seq_len].cpu()
+            # print_matrix(attn_after, words, words,
+            #             "p_attn AFTER calibration  = softmax(·) × C  ← sum != 1 nữa")
+
+            # ── Ma trận 3: context = p_attn_after × V ────────────────────
+            ctx = last_layer.context[i].cpu()          # [heads, seq, d_k]
+            ctx_mean = ctx.mean(0)[:seq_len, :]        # [seq, d_k]
+            show_dims = min(ctx_mean.size(1), 16)
+            dim_labels = [f"d{j}" for j in range(show_dims)]
+            print_matrix(ctx_mean[:, :show_dims], words, dim_labels,
+                        f"context = p_attn_after × V  (mean {ctx.size(0)} heads, {show_dims} dims đầu)",
+                        fmt=".2f")
+
+            # ── L2 norm của context ───────────────────────────────────────
+            ctx_norm = ctx_mean.norm(dim=-1)
+            print(f"\n--- ‖context‖ L2 norm ---")
+            print(f"{'Token':<15} {'norm':>7}  bar")
+            print("─"*52)
+            mx_norm = ctx_norm.max().item() + 1e-9
+            for j, w in enumerate(words):
+                nv = ctx_norm[j].item()
+                bar = "█" * int(nv/mx_norm*30) + "░"*(30-int(nv/mx_norm*30))
+                print(f"{w:<15} {nv:>7.4f}  {bar}")
+
+            # ── P(error) và C diagonal ────────────────────────────────────
+            p_i = P[i, :seq_len].cpu()
+            print(f"\n--- P(error) và C[j,j] = 1 - P[j]² (diagonal của C) ---")
+            print(f"{'Token':<15} {'P(err)':>8}  {'C[j,j]':>8}  bar P")
+            print("─"*55)
+            for j, w in enumerate(words):
+                pv = p_i[j].item()
+                cjj = 1 - pv*pv
+                bar = "█"*int(pv*30) + "░"*(30-int(pv*30))
+                flag = " ← HIGH" if pv > 0.4 else ""
+                print(f"{w:<15} {pv:>8.4f}  {cjj:>8.4f}  {bar}{flag}")
+
+            # ── Std từng head: before vs after ───────────────────────────
+            print(f"\n--- Std từng head (before → after calibration) ---")
+            for h in range(last_layer.attn_before[i].size(0)):
+                sb = last_layer.attn_before[i, h, :seq_len, :seq_len].std().item()
+                sa = last_layer.attn_after[i,  h, :seq_len, :seq_len].std().item()
+                flag_b = " ← uniform!" if sb < 1e-4 else ""
+                print(f"  Head {h}: {sb:.6f} → {sa:.6f}{flag_b}")
+
+            break
     net.train()
     for noise_sents, clean_sents, labels in pbar:
         if stop_training:
@@ -487,4 +676,3 @@ if __name__ == '__main__':
     # clean_checkpoints("checkpoints/deepsc-Rayleigh", keep_latest_n=5)
 
     print("Training finished.")
-

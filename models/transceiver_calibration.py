@@ -163,19 +163,24 @@ class CalibratedSelfAttention(nn.Module):
         d_k = query.size(-1)
         scores = torch.matmul(query, key.transpose(-2, -1)) \
                  / math.sqrt(d_k)
-        scores_before = scores.clone()
-        
+
+        # print(mask.shape)
+        # if calibration is not None:
+        #     scores = scores * calibration
         if mask is not None:
             scores += (mask * -1e9)
             # attention weights
+
+        self.attn_before = F.softmax(scores.clone(), dim=-1)
+
         p_attn = F.softmax(scores, dim=-1)
-        self.attn_before = F.softmax(scores_before, dim=-1)
-
-        # print(mask.shape)
         if calibration is not None:
-            scores = scores * calibration
+            C = calibration.unsqueeze(1)
+            p_attn = p_attn * C
+            # p_attn = p_attn / (p_attn.sum(dim=-1, keepdim=True) + 1e-9)  # optional
 
-        self.attn_after  = p_attn
+        self.attn_after = p_attn
+        self.context = torch.matmul(p_attn, value)
 
         return torch.matmul(p_attn, value), p_attn
     
@@ -292,14 +297,17 @@ class Encoder(nn.Module):
             # P = [batch, seq]
             # P_outer = [batch, seq, seq]
             # C = [batch, seq, seq]
-            # P = self.detector(x) 
-            # P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
-            # C = 1 - P_outer
+            P = self.detector(x) 
+            P_outer = torch.bmm(P.unsqueeze(2), P.unsqueeze(1))
+            C = 1 - P_outer
+            # P = self.detector(x)  # [batch, seq]
+            # C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch,1,1,seq]
+            # C = C.expand(-1, 1, P.size(1), -1)      # [batch,1,seq,seq]
             # Trong Encoder.forward()
-            P = self.detector(x)              # [batch, seq]
-            C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch, 1, 1, seq]
-            C = C.expand(-1, 1, P.size(1), -1)      # [batch, 1, seq, seq]
-
+            # P = self.detector(x)              # [batch, seq]
+            # C = (1 - P).unsqueeze(1).unsqueeze(2)   # [batch, 1, 1, seq]
+            # C = C.expand(-1, 1, P.size(1), -1)      # [batch, 1, seq, seq]
+        
         return x, P
     
 class DecoderLayer(nn.Module):
