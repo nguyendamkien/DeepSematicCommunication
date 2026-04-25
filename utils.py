@@ -21,6 +21,7 @@ from nltk import sent_tokenize
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from torchvision.models import RegNet_X_8GF_Weights
 from w3lib.html import remove_tags
+from models.fgm import FGM
 
 # from models.mutual_info import sample_batch, mutual_information
 
@@ -104,20 +105,28 @@ def loss_function(x, trg, padding_idx, criterion):
 #    power = torch.mean(torch.abs(signal) ** 2)
 #    return signal / torch.sqrt(power) if power > 0 #else signal
 
-def power_normalize(signal, eps=1e-12):
-    """
-    Normalize signal power to unit average power per sample.
-    Args:
-        signal: Tensor of shape [B, L, d] or [B, ...]
-        eps: Small constant to prevent division by zero
-    Returns:
-        Normalized signal with average power 1 per sample
-    """
-    # Compute mean power per sample
-    power = torch.mean(torch.abs(signal) ** 2, dim=tuple(range(1, signal.dim())), keepdim=True)
-    # Normalize
-    normalized_signal = signal / torch.sqrt(power + eps)
-    return normalized_signal
+# def power_normalize(signal, eps=1e-12):
+#     """
+#     Normalize signal power to unit average power per sample.
+#     Args:
+#         signal: Tensor of shape [B, L, d] or [B, ...]
+#         eps: Small constant to prevent division by zero
+#     Returns:
+#         Normalized signal with average power 1 per sample
+#     """
+#     # Compute mean power per sample
+#     power = torch.mean(torch.abs(signal) ** 2, dim=tuple(range(1, signal.dim())), keepdim=True)
+#     # Normalize
+#     normalized_signal = signal / torch.sqrt(power + eps)
+#     return normalized_signal
+
+def power_normalize(x):
+    x_square = torch.mul(x, x)
+    power = torch.mean(x_square).sqrt()
+    if power > 1:
+        x = torch.div(x, power)
+
+    return x
 
 # DeepSC CHannel for 3GPP
 class DeepSCChannel:
@@ -1049,7 +1058,7 @@ def plot_bleu_vs_snr(data_dict,
     plt.show()
     plt.close()
 
-def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, channel, bce_loss_fn):
+def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, channel, bce_loss_fn, fgm=None):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
@@ -1133,9 +1142,48 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     
     # backprop + update
     loss.backward()
+
+     # === FGM Adversarial Training ===
+    if fgm is not None:
+        fgm.attack(emb_name='embedding')  # Cộng nhiễu vào embedding
+
+        # Forward lần 2 với embedding đã bị nhiễu
+        enc_output_adv, pred_error_prob_adv = model.encoder(src, src_mask)
+        channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+        Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+        if channel == 'AWGN':
+            Rx_sig_adv, snr_adv = channels.AWGN(Tx_sig_adv, n_var)
+        elif channel == 'Rayleigh':
+            Rx_sig_adv, snr_adv = channels.Rayleigh(Tx_sig_adv, n_var)
+        elif channel == 'Rician':
+            Rx_sig_adv, snr_adv = channels.Rician(Tx_sig_adv, n_var)
+        elif channel == 'TimeVaryingRician':
+            Rx_sig_adv, snr_adv = channels.TimeVaryingRician(Tx_sig_adv, n_var)
+        # Rx_sig_adv, _ = channels.AWGN(Tx_sig_adv, n_var)
+
+        channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+        dec_output_adv = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask, src_mask)
+        pred_adv = model.dense(dec_output_adv)
+        ntokens_adv = pred_adv.size(-1)
+
+        loss_ce_adv = loss_function(pred_adv.contiguous().view(-1, ntokens_adv),
+                                 trg_real.contiguous().view(-1), pad, criterion)
+        
+        bce_scores_adv = bce_loss_fn(pred_error_prob_adv, true_error_label)  # [batch, seq_len]
+        
+        loss_bce_adv = (bce_scores_adv * mask).sum() / mask.sum()
+        
+        loss_adv = loss_ce_adv + 0.5 * loss_bce_adv
+        
+        loss_adv.backward()  # Backward lần 2 — gradient tích lũy
+
+        fgm.restore(emb_name='embedding')  # Khôi phục embedding
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
     opt.step()
 
-    return loss.item(), loss_bce.item(), snr
+    return loss.item(), loss_bce.item(), loss_adv.item(), snr
 
 def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel, bce_loss_fn):
     model.eval()
