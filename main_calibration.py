@@ -38,8 +38,9 @@ parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--num-layers', default=4, type=int)
 parser.add_argument('--num-heads', default=8, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
-parser.add_argument('--epochs', default=30, type=int)
-parser.add_argument('--epsilon', default=0.1, type=float)
+parser.add_argument('--epochs', default=25, type=int)
+parser.add_argument('--epsilon', default=0.05, type=float)
+parser.add_argument('--fgm-warmup', default=20, type=int)
 
 # thêm argument action
 parser.add_argument(
@@ -67,7 +68,7 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 # Training funtion
-def train(epoch, args, net, fgm):
+def train(epoch, args, net, fgm, fgm_warmup):
     global stop_training
     train_eur = EurDataset('train')
     train_iterator = DataLoader(train_eur, batch_size=args.batch_size,
@@ -83,6 +84,11 @@ def train(epoch, args, net, fgm):
     # mi_bits_total = 0
     batch_count = 0
     snr_values = []
+
+    # Quyết định có dùng FGM không
+    use_fgm = (fgm is not None) and (epoch >= fgm_warmup)
+    if use_fgm:
+        print(f"[Epoch {epoch+1}] FGM ENABLED (epsilon={fgm.epsilon})")
 
     #noise_sent la cau goc, clean la target muon nhan
     for noise_sents, clean_sents, labels in pbar:
@@ -112,7 +118,7 @@ def train(epoch, args, net, fgm):
         #         f'Epoch: {epoch + 1}; Type: Train; Loss: {loss_total:.5f}; MI Loss: {mi_loss:.5f}; MI (bits): {mi_bits:.5f}; SNR: {snr:.5f}')
         # else:
         loss_total, bce_loss_val, loss_adv_val, snr = train_step_calibration(net, noise_sents, clean_sents, labels, noise_std, pad_idx,
-                                     optimizer, criterion, args.channel, bce_loss_fn, fgm)
+                                     optimizer, criterion, args.channel, bce_loss_fn, fgm=fgm if use_fgm else None)
         epoch_loss += loss_total
         epoch_bce_loss += bce_loss_val
         epoch_adv_loss += loss_adv_val
@@ -165,18 +171,17 @@ def validate(epoch, args, net, seq_to_text):
             noise_sents = noise_sents.to(device)
             clean_sents = clean_sents.to(device)
             labels = labels.to(device)
-            loss, bce_loss_val, snr = val_step_calibration(net, noise_sents, clean_sents, labels, 0.1, pad_idx, criterion,
-                                 args.channel, bce_loss_fn)
+            loss, snr = val_step_calibration(net, noise_sents, clean_sents, labels, 0.1, pad_idx, criterion,
+                                 args.channel)
             # TimeVaryingRician
             # loss, snr = val_step(net, sents, sents, 0.18, pad_idx, criterion,
             #                      args.channel, seq_to_text)
             total += loss
-            total_bce += bce_loss_val
             pbar.set_description(
-                f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}; BCE: {bce_loss_val:.5f}')
-    return total / len(val_iterator), total_bce / len(val_iterator)
+                f'Epoch: {epoch + 1}; Type: VAL; Loss: {loss:.5f}')
+    return total / len(val_iterator)
 
-def save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_loss,
+def save_checkpoint(epoch, avg_loss, epoch_train_loss, train_bce_loss,
                     train_adv_loss, snr_min, snr_max, snr_avg):
     checkpoint_path = os.path.join(
         args.checkpoint_path,
@@ -191,7 +196,6 @@ def save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_l
         'optimizer_state_dict': optimizer.state_dict(),
         # 'mi_opt_state_dict': mi_opt.state_dict(),
         'loss': avg_loss,
-        'val_bce_loss': val_bce_loss,
         'train_loss': epoch_train_loss,
         'train_bce_loss': train_bce_loss,
         'train_adv_loss': train_adv_loss,
@@ -201,7 +205,7 @@ def save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_l
     }, checkpoint_path)
 
     print(
-        f"Checkpoint saved at {checkpoint_path} with epoch {epoch + 1}, val loss {avg_loss:.5f}, val BCE {val_bce_loss:.5f}, SNR Min: {snr_min:.2f}, Max: {snr_max:.2f}, Avg: {snr_avg:.2f}")
+        f"Checkpoint saved at {checkpoint_path} with epoch {epoch + 1}, val loss {avg_loss:.5f}, SNR Min: {snr_min:.2f}, Max: {snr_max:.2f}, Avg: {snr_avg:.2f}")
 
 if __name__ == '__main__':
     # Check PyTorch's CUDA availability
@@ -317,17 +321,17 @@ if __name__ == '__main__':
         start = time.time()
         # Training
         interrupted, epoch_train_loss, train_bce_loss, train_adv_loss, snr_min, snr_max, snr_avg = train(
-            epoch, args, ca_deepsc, fgm)
+            epoch, args, ca_deepsc, fgm=fgm, fgm_warmup=args.fgm_warmup)
         if interrupted:
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")
-            avg_loss, val_bce_loss = validate(epoch, args, ca_deepsc, seq_to_text)
-            save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_loss,
+            avg_loss = validate(epoch, args, ca_deepsc, seq_to_text)
+            save_checkpoint(epoch, avg_loss, epoch_train_loss, train_bce_loss,
                 train_adv_loss, snr_min, snr_max, snr_avg)
             break
 
-        avg_loss, val_bce_loss = validate(epoch, args, ca_deepsc, seq_to_text)
-        save_checkpoint(epoch, avg_loss, val_bce_loss, epoch_train_loss, train_bce_loss,
+        avg_loss = validate(epoch, args, ca_deepsc, seq_to_text)
+        save_checkpoint(epoch, avg_loss, epoch_train_loss, train_bce_loss,
                 train_adv_loss, snr_min, snr_max, snr_avg)
         
         print(f"GPU Utilization: {torch.cuda.utilization(0)}%")

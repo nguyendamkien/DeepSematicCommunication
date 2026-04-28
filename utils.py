@@ -1138,10 +1138,11 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
     # Apply mask and average over non-padding positions
     loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-    loss = loss_ce + 0.5 * loss_bce
+    loss = loss_ce + 0.1 * loss_bce
     
     # backprop + update
     loss.backward()
+    loss_adv_val = 0
 
      # === FGM Adversarial Training ===
     if fgm is not None:
@@ -1174,18 +1175,19 @@ def train_step_calibration(model, src, trg, labels, n_var, pad, opt, criterion, 
         
         loss_bce_adv = (bce_scores_adv * mask).sum() / mask.sum()
         
-        loss_adv = loss_ce_adv + 0.5 * loss_bce_adv
+        loss_adv = loss_ce_adv + 0.1 * loss_bce_adv
         
         loss_adv.backward()  # Backward lần 2 — gradient tích lũy
 
         fgm.restore(emb_name='embedding')  # Khôi phục embedding
+        loss_adv_val = loss_adv.item()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
     opt.step()
 
-    return loss.item(), loss_bce.item(), loss_adv.item(), snr
+    return loss.item(), loss_bce.item(), loss_adv_val, snr
 
-def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel, bce_loss_fn):
+def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel):
     model.eval()
     with torch.no_grad():
         trg_inp = trg[:, :-1]
@@ -1207,7 +1209,7 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
 
         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
 
-        true_error_label = labels.float()
+        # true_error_label = labels.float()
 
         enc_output, pred_error_prob = model.encoder(src, src_mask)
         channel_enc_output= model.channel_encoder(enc_output)
@@ -1242,21 +1244,10 @@ def val_step_calibration(model, src, trg, labels, n_var, pad, criterion, channel
                                    src_mask)
         pred = model.dense(dec_output)
         ntokens = pred.size(-1)
-        loss_ce = loss_function(pred.contiguous().view(-1, ntokens),
+        loss = loss_function(pred.contiguous().view(-1, ntokens),
                              trg_real.contiguous().view(-1), pad, criterion)
-        
-        # BCE loss with proper masking for padding tokens
-        mask = (src != pad).float()  # [batch, seq_len]
-        
-        # Calculate BCE loss for each token (reduction='none')
-        bce_scores = bce_loss_fn(pred_error_prob, true_error_label)  # [batch, seq_len]
-        
-        # Apply mask and average over non-padding positions
-        loss_bce = (bce_scores * mask).sum() / mask.sum()
 
-        loss = loss_ce + 0.5 * loss_bce
-
-    return loss.item(), loss_bce.item(), snr
+    return loss.item(), snr
 
 def greedy_decode_calibration(model, src, n_var, max_len, padding_idx, start_symbol,
                   channel, device):
