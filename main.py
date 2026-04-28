@@ -194,6 +194,7 @@ def save_checkpoint(epoch, avg_loss, epoch_train_loss, epoch_adv_loss,
         'snr_min': snr_min,
         'snr_max': snr_max,
         'snr_avg': snr_avg,
+        'scheduler_state_dict': scheduler.state_dict(),
     }, checkpoint_path)
 
     print(
@@ -229,14 +230,22 @@ if __name__ == '__main__':
     
     deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
-    mi_net = Mine().to(device)
-    fgm = FGM(deepsc, epsilon=args.epsilon)
+    mi_net = Mine().to(device)  
+    
     criterion = nn.CrossEntropyLoss(reduction='none')
     optimizer = torch.optim.Adam(deepsc.parameters(), lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                                                            optimizer, 
+                                                            mode='min', 
+                                                            factor=0.5, 
+                                                            patience=0, 
+                                                            verbose=True
+                                                        )   
     mi_opt = torch.optim.Adam(mi_net.parameters(), lr=0.001)
 
     initNetParams(deepsc)
+    fgm = FGM(deepsc, epsilon=args.epsilon)
 
     # List available checkpoints
     list_checkpoints(args.checkpoint_path)
@@ -259,6 +268,8 @@ if __name__ == '__main__':
             deepsc.load_state_dict(checkpoint['model_state_dict'])
             # mi_net.load_state_dict(checkpoint['mi_net_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             # mi_opt.load_state_dict(checkpoint['mi_opt_state_dict'])
             print(
                 f"Resuming from epoch {start_epoch} with loss {checkpoint['loss']:.5f}")
@@ -285,11 +296,13 @@ if __name__ == '__main__':
             print(
                 f"Training stopped at epoch {epoch + 1}. Saving checkpoint...")
             avg_loss = validate(epoch, args, deepsc, seq_to_text)
+            scheduler.step(avg_loss)
             save_checkpoint(epoch, avg_loss, epoch_train_loss,
                 epoch_adv_loss, avg_mi_bits, snr_min, snr_max, snr_avg)
             break
 
         avg_loss = validate(epoch, args, deepsc, seq_to_text)
+        scheduler.step(avg_loss)
         save_checkpoint(epoch, avg_loss, epoch_train_loss,
                 epoch_adv_loss, avg_mi_bits, snr_min, snr_max, snr_avg)
         
