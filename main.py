@@ -39,6 +39,7 @@ parser.add_argument('--num-heads', default=8, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
 parser.add_argument('--epochs', default=30, type=int)
 parser.add_argument('--epsilon', default=0.5, type=float)
+parser.add_argument('--learning-rate', default=1e-4, type=float)
 
 # thêm argument action
 parser.add_argument(
@@ -233,7 +234,7 @@ if __name__ == '__main__':
     mi_net = Mine().to(device)  
     
     criterion = nn.CrossEntropyLoss(reduction='none')
-    optimizer = torch.optim.Adam(deepsc.parameters(), lr=1e-4,
+    optimizer = torch.optim.Adam(deepsc.parameters(), lr=args.learning_rate,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                                                             optimizer, 
