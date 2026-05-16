@@ -20,20 +20,20 @@ from tqdm import tqdm
 from transformers import BertModel, BertTokenizer
 
 from dataset import EurDataset, collate_pair_data
-from models.transceiver import DeepSC
-from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
+from models.transceiver_calibration import CA_DeepSC
+from utils import BleuScore, SNR_to_noise, greedy_decode_calibration, SeqtoText, \
     save_evaluation_scores, load_checkpoint
 
 # Argument parser setup
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
+parser.add_argument('--data-dir', default='test_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 # parser.add_argument('--checkpoint-path',
 #                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
 #                     type=str)
 # parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='/kaggle/working/checkpoints/deepsc-AWGN',
+                    default='./kaggle/working/checkpoints/r-deepsc-AWGN-semanticnoise',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
@@ -192,17 +192,19 @@ def performance(args, SNR, net):
 
                         noise_sents = noise_sents.to(device)
                         target = clean_sents.to(device)
-                        out, snr_value = greedy_decode(net, noise_sents, noise_std,
+                        out, snr_value = greedy_decode_calibration(net, noise_sents, noise_std,
                                                        args.MAX_LENGTH, pad_idx,
                                                        start_idx,
                                                        args.channel, device)
                         sentences = out.cpu().numpy().tolist()
                         result_string = list(
                             map(StoT.sequence_to_text, sentences))
+                        #them cau du doan
                         word.extend(result_string)
                         target_sent = target.cpu().numpy().tolist()
                         result_string = list(
                             map(StoT.sequence_to_text, target_sent))
+                        #them cau goc
                         target_word.extend(result_string)
 
                         # Update samples processed
@@ -286,17 +288,40 @@ if __name__ == '__main__':
     start_idx = token_to_idx["<START>"]
     end_idx = token_to_idx["<END>"]
 
-    deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
+    StoT = SeqtoText(token_to_idx, end_idx)
+
+    # noisy_test_data = EurDataset('noisy_test')
+
+    # test_iterator = DataLoader(noisy_test_data, batch_size=args.batch_size,
+    #                                        num_workers=0, pin_memory=True,
+    #                                        collate_fn=collate_pair_data)
+    # print(test_iterator)
+
+    # print(enumerate(test_iterator))
+
+    # for i, (noise, trg) in enumerate(test_iterator):
+    #     print(noise, trg)
+    #     break
+    # print(noisy_test_data[:2])
+    # for abs in noisy_test_data[:5]:
+    #     noisy_src, original_src = abs
+
+    #     print("Noisy:", noisy_src)
+    #     print("Original:", original_src)
+    #     print("Original:", StoT.sequence_to_text(original_src))
+    #     print("Noisy:", StoT.sequence_to_text(noisy_src))
+
+    ca_deepsc = CA_DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
 
     checkpoint = load_checkpoint(args.checkpoint_path, mode='best')
     if checkpoint:
-        deepsc.load_state_dict(checkpoint['model_state_dict'])
+        ca_deepsc.load_state_dict(checkpoint['model_state_dict'])
         best_loss = checkpoint['loss']
         print(f"Loaded best checkpoint with loss {best_loss:.5f}")
     else:
         print("No best checkpoint found.")
 
-    bleu_score, similarity_score = performance(args, SNR, deepsc)
+    bleu_score, similarity_score = performance(args, SNR, ca_deepsc)
     print(bleu_score)
     print(similarity_score)
