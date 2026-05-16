@@ -17,26 +17,21 @@ from tqdm import tqdm
 
 from dataset import EurDataset, collate_pair_data
 from models.transceiver import DeepSC
-from models.transceiver_calibration import CA_DeepSC
 from performance import Similarity
 from utils import SNR_to_noise, greedy_decode, SeqtoText, BleuScore, load_checkpoint, \
-    debug_greedy_decode, greedy_decode_calibration
+    debug_greedy_decode
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
-# parser.add_argument('--checkpoint-path',
-#                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
-#                     type=str)
-# parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='./kaggle/working/checkpoints/r-deepsc-AWGN-semanticnoise',
+                    default='./kaggle/working/checkpoints/deepsc-awgn',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
 parser.add_argument('--batch-size', default=1,
                     type=int)  # Set batch size to 1 for detailed observation
-parser.add_argument('--SNR', default=12, type=int)  # Default SNR for testing
+parser.add_argument('--SNR', default=18, type=int)  # Default SNR for testing
 parser.add_argument('--d-model', default=128, type=int)
 parser.add_argument('--dff', default=512, type=int)
 parser.add_argument('--num-layers', default=4, type=int)
@@ -341,7 +336,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # SNR value for inference
-    SNR = args.SNR
+    SNR = 18
 
     # Load vocabulary
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
@@ -375,9 +370,10 @@ if __name__ == '__main__':
     test_dataset = EurDataset('test')
     # print(test_dataset[0][0])
     # Chọn câu đầu tiên từ test set, convert sang tensor
-    sample_noise = torch.tensor(test_dataset[4][0], dtype=torch.long).unsqueeze(0).to(device)
-    sample_clean = torch.tensor(test_dataset[4][1], dtype=torch.long).unsqueeze(0).to(device)
-    sample_label = torch.tensor(test_dataset[4][2], dtype=torch.long).unsqueeze(0).to(device)
+    sample_noise = torch.tensor(test_dataset[86][0], dtype=torch.long).unsqueeze(0).to(device)
+    sample_clean = torch.tensor(test_dataset[86][1], dtype=torch.long).unsqueeze(0).to(device)
+    sample_label = torch.tensor(test_dataset[86]
+    [2], dtype=torch.long).unsqueeze(0).to(device)
     print(sample_noise)
     print(sample_clean)
     print(sample_label)

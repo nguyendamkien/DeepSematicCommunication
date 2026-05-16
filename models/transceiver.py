@@ -349,3 +349,6 @@ class DeepSC(nn.Module):
         # Final output layer
         # Input: [batch_size, seq_len, d_model] -> Output: [batch_size, seq_len, trg_vocab_size]
         self.dense = nn.Linear(d_model, trg_vocab_size)
+
+
+

@@ -35,10 +35,10 @@ class EurDataset(Dataset):
         Args:
             index (int): The index of the sample.
         Returns:
-            noise_sents, clean_sents, labels: The noisy sentence, clean sentence, and error labels.
+            sents: The sentence at the given index.
         """
-        noise_sents, clean_sents, labels = self.data[index]
-        return noise_sents, clean_sents, labels
+        sents = self.data[index]
+        return sents
 
     def __len__(self):
         """
@@ -77,9 +77,6 @@ def collate_data(batch):
      # Convert NumPy array to a PyTorch tensor for model input
     return torch.from_numpy(sents)
 
-import numpy as np
-import torch
-
 def collate_pair_data(batch):
     batch_size = len(batch)
     target_len = 35
@@ -110,3 +107,4 @@ def collate_pair_data(batch):
         label_tensor[i, :label_len] = labels[i][:label_len]
 
     return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
+
