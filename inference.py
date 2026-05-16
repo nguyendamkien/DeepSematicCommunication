@@ -25,7 +25,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
 parser.add_argument('--checkpoint-path',
-                    default='./kaggle/working/checkpoints/deepsc-awgn',
+                    default='./kaggle/working/checkpoints/mask-deepsc-awgn',
                     type=str)
 parser.add_argument('--channel', default='AWGN', type=str)
 parser.add_argument('--MAX-LENGTH', default=30, type=int)
@@ -370,10 +370,9 @@ if __name__ == '__main__':
     test_dataset = EurDataset('test')
     # print(test_dataset[0][0])
     # Chọn câu đầu tiên từ test set, convert sang tensor
-    sample_noise = torch.tensor(test_dataset[86][0], dtype=torch.long).unsqueeze(0).to(device)
-    sample_clean = torch.tensor(test_dataset[86][1], dtype=torch.long).unsqueeze(0).to(device)
-    sample_label = torch.tensor(test_dataset[86]
-    [2], dtype=torch.long).unsqueeze(0).to(device)
+    sample_noise = torch.tensor(test_dataset[80][0], dtype=torch.long).unsqueeze(0).to(device)
+    sample_clean = torch.tensor(test_dataset[80][1], dtype=torch.long).unsqueeze(0).to(device)
+    sample_label = torch.tensor(test_dataset[80][2], dtype=torch.long).unsqueeze(0).to(device)
     print(sample_noise)
     print(sample_clean)
     print(sample_label)

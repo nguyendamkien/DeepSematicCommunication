@@ -23,6 +23,171 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+"create mask nt, perturb attention"
+class MaskPerturbation(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+
+    def forward(self, Q, K):
+        """
+        Q: (batch, seq_len, d_model)
+        K: (batch, seq_len, d_model)
+        """
+        q_proj = self.wq(Q) #q*Wq
+        k_proj = self.wk(K) #k*Wk
+
+        d_k = Q.size(-1)
+
+        scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / math.sqrt(d_k)
+        
+        m = torch.sigmoid(scores)  # mask m_t
+
+        return m
+    
+# perturbed attention weight
+def perturb_attention_weight(attn, mask):
+    """
+    attn: (batch, heads, seq_len, seq_len)
+    mask: (batch, seq_len, seq_len)
+    """
+    # expand mask cho multi-head
+    # mask: (batch, 1, seq_len, seq_len)
+    mask = mask.unsqueeze(1)
+
+    seq_len = attn.size(-1)
+    uniform = torch.ones_like(attn) / seq_len
+
+    attn_perturbed_weight = mask * attn + (1 - mask) * uniform
+
+    return attn_perturbed_weight
+
+# calibrated attention weight
+def calibrate_attention_weight(attn, mask):
+    """
+    attn: (batch, heads, seq_len, seq_len)
+    mask: (batch, seq_len, seq_len)
+    """
+    mask = mask.unsqueeze(1)
+
+    attn_cal = attn * torch.exp(1 - mask)
+
+    # Re-normalize để tổng = 1 trên dimension cuối
+    attn_cal = attn_cal / (attn_cal.sum(dim=-1, keepdim=True) + 1e-9)
+
+    return attn_cal
+
+class AttentionCalibration(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        # Wg and bg are layer-level trainable parameters (vary among layers).
+        # Output dim = num_heads so each head gets its own scalar gate.
+        self.gate = nn.Linear(d_model, num_heads)
+
+    def forward(self, Q, attn, attn_cal):
+        """
+        Implements:
+            g_t  = σ(q_t · Wg + bg)          [per query position, per head]
+            a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
+
+        Args:
+            Q       : (batch, seq_len, d_model)          – query (pre-split)
+            attn    : (batch, heads, seq_len, seq_len)   – original attention
+            attn_cal: (batch, heads, seq_len, seq_len)   – calibrated attention
+        Returns:
+            attn_comb: (batch, heads, seq_len, seq_len)  – combined attention (post-softmax)
+        """
+        # g_t = σ(Q · Wg + bg)
+        # Q: (batch, seq_len, d_model)
+        # gate output: (batch, seq_len, num_heads)
+        g = torch.sigmoid(self.gate(Q))
+
+        # Reshape to (batch, num_heads, seq_len, 1) so it broadcasts over
+        # the key-dimension of attn: (batch, heads, seq_len, seq_len)
+        g = g.permute(0, 2, 1).unsqueeze(-1)  # (batch, heads, seq_len, 1)
+
+        # a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
+        attn_comb = g * attn + (1 - g) * attn_cal
+
+        return attn_comb
+    
+class CalibratedMultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, d_model, dropout=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.d_k = d_model // num_heads
+
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
+
+        self.dense = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(p=dropout)
+
+        self.mask_perturbation_model = MaskPerturbation(d_model)
+        self.calibration = AttentionCalibration(d_model, num_heads)
+
+    def forward(self, query, key, value, mask=None, use_perturb=False):
+        if mask is not None:
+            # Same mask applied to all h heads.
+            mask = mask.unsqueeze(1)
+        nbatches = query.size(0)
+
+        query_origin = query
+        key_origin = key
+
+        # 1) Do all the linear projections in batch from d_model => h x d_k
+        query = self.wq(query).view(nbatches, -1, self.num_heads, self.d_k)
+        query = query.transpose(1, 2)
+
+        key = self.wk(key).view(nbatches, -1, self.num_heads, self.d_k)
+        key = key.transpose(1, 2)
+
+        value = self.wv(value).view(nbatches, -1, self.num_heads, self.d_k)
+        value = value.transpose(1, 2)
+
+        # mask perturbation
+        mask_perturbation = self.mask_perturbation_model(query_origin, key_origin)
+
+        # attention gốc
+        x, attn = self.attention(query, key, value, mask=mask)
+
+        if use_perturb:
+            # dùng attention bị phá
+            attn_final = perturb_attention_weight(attn, mask_perturbation)
+        else:
+            # calibration: a_comb = g*a_t + (1-g)*a_c  (raw, chưa softmax)
+            attn_cal = calibrate_attention_weight(attn, mask_perturbation)
+            attn_final = self.calibration(query_origin, attn, attn_cal)
+
+        # output
+        out = torch.matmul(attn_final, value)
+
+        out = out.transpose(1, 2).contiguous().view(nbatches, -1, self.d_model)
+
+        out = self.dense(out)
+
+        out = self.dropout(out)
+
+        return out, mask_perturbation
+    
+    def attention(self, query, key, value, mask=None):
+        """Compute 'Scaled Dot Product Attention'"""
+        d_k = query.size(-1)
+        scores = torch.matmul(query, key.transpose(-2, -1)) \
+                 / math.sqrt(d_k)
+        # print(mask.shape)
+        if mask is not None:
+            scores = scores + (mask * -1e9)
+        p_attn = F.softmax(scores, dim=-1)
+        return torch.matmul(p_attn, value), p_attn
+    
+# loss_mask = - loss_nmt(attn_perturbed) + alpha * torch.norm(1 - mask)
+
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
 
@@ -88,7 +253,7 @@ class MultiHeadedAttention(nn.Module):
         #             for l, x in zip(self.linears, (query, key, value))]
 
         # 2) Apply attention on all the projected vectors in batch.
-        x, self.attn = self.attention(query, key, value, mask=mask)
+        x, attn = self.attention(query, key, value, mask=mask)
 
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous() \
@@ -139,7 +304,7 @@ class EncoderLayer(nn.Module):
 
         # Multi-head attention for processing input sequence
         # Input/Output: [batch_size, seq_len, d_model]
-        self.mha = MultiHeadedAttention(num_heads, d_model, dropout=0.1)
+        self.mha = MultiHeadedAttention(num_heads, d_model)
 
         # Position-wise feed-forward network
         # Input/Output: [batch_size, seq_len, d_model]
@@ -175,7 +340,7 @@ class DecoderLayer(nn.Module):
         super(DecoderLayer, self).__init__()
         self.self_mha = MultiHeadedAttention(num_heads, d_model,
                                              dropout=0.1)  # Masked self-attention
-        self.src_mha = MultiHeadedAttention(num_heads, d_model,
+        self.src_mha = CalibratedMultiHeadAttention(num_heads, d_model,
                                             dropout=0.1)  # Encoder-decoder attention
         self.ffn = PositionwiseFeedForward(d_model, dff,
                                            dropout=0.1)  # Feedforward network
@@ -184,7 +349,7 @@ class DecoderLayer(nn.Module):
         self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
     
-    def forward(self, x, memory, look_ahead_mask, trg_padding_mask):
+    def forward(self, x, memory, look_ahead_mask, trg_padding_mask, use_perturb=False):
         """Follow Figure 1 (right) for connections."""
         """
         Inputs:
@@ -192,7 +357,7 @@ class DecoderLayer(nn.Module):
             memory: [batch_size, src_seq_len, d_model] - Channel Decoder output
             look_ahead_mask: [batch_size, tgt_seq_len, tgt_seq_len] - Causal mask
             trg_padding_mask: [batch_size, tgt_seq_len, src_seq_len] - Cross-attention mask
-        Output: [batch_size, tgt_seq_len, d_model]
+        Output: ([batch_size, tgt_seq_len, d_model], mask_perturbation)
         """
         # m = memory
 
@@ -203,15 +368,15 @@ class DecoderLayer(nn.Module):
             x + attn_output)  # Residual connection + normalization
 
         # 2. Cross-attention (decoder attends to encoder output)
-        src_output = self.src_mha(x, memory, memory,
-                                  trg_padding_mask)  # Q=x, K=V=memory
+        src_output, m_t = self.src_mha(x, memory, memory,
+                                  trg_padding_mask, use_perturb=use_perturb )  # Q=x, K=V=memory
         x = self.layernorm2(x + src_output)
 
         # 3. Feedforward network
         fnn_output = self.ffn(x)
         x = self.layernorm3(x + fnn_output)
 
-        return x
+        return x, m_t
     
 class Encoder(nn.Module):
     """Core encoder is a stack of N layers"""
@@ -266,24 +431,25 @@ class Decoder(nn.Module):
             [DecoderLayer(d_model, num_heads, dff, dropout)
              for _ in range(num_layers)])  # Stack of decoder layers
         
-    def forward(self, x, memory, look_ahead_mask, trg_padding_mask):
+    def forward(self, x, memory, look_ahead_mask, trg_padding_mask, use_perturb=False):
         """
         Inputs:
             x: [batch_size, tgt_seq_len] - Target tokens
             memory: [batch_size, src_seq_len, d_model] - Encoder output
             look_ahead_mask: [batch_size, tgt_seq_len, tgt_seq_len]
             trg_padding_mask: [batch_size, tgt_seq_len, src_seq_len]
-        Output: [batch_size, tgt_seq_len, d_model]
+        Output: ([batch_size, tgt_seq_len, d_model], mask_perturbation)
         """
         # Convert token indices to embeddings
         x = self.embedding(x) * math.sqrt(self.d_model)  # Scale embedding
         x = self.pos_encoding(x)  # Add positional encoding
 
         # Pass through each decoder layer
+        m_t = None
         for dec_layer in self.dec_layers:
-            x = dec_layer(x, memory, look_ahead_mask, trg_padding_mask)
+            x, m_t = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
 
-        return x  # Final decoder output
+        return x, m_t  # Final decoder output and mask perturbation
     
 class ChannelDecoder(nn.Module):
     """Channel decoder for converting channel-coded features back to semantic space

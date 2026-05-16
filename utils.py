@@ -22,7 +22,7 @@ from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from torchvision.models import RegNet_X_8GF_Weights
 from w3lib.html import remove_tags
 
-from models.mutual_info import sample_batch, mutual_information
+# from models.mutual_info import sample_batch, mutual_information
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 nltk.download('punkt_tab')
@@ -64,27 +64,25 @@ def SNR_to_noise(snr):
 
     return noise_std
 
-def PowerNormalize(x):
-    x_square = torch.mul(x, x)
-    power = torch.mean(x_square).sqrt()
-    if power > 1:
-        x = torch.div(x, power)
-
-    return x
-
 def subsequent_mask(size):
     """
     Mask out subsequent positions.
     """
+    #shape of tensor, batch = 1, matrix attention size * size
     attn_shape = (1, size, size)
-    # 产生下三角矩阵
+    """
+    [[0 1 1 1]
+    [0 0 1 1]
+    [0 0 0 1]
+    [0 0 0 0]]
+    """
     subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask)
 
 def create_masks(src, trg, padding_idx):
-    # Create mask for source sequence padding
+    # Create mask for source sequence padding - for encoder to mask pad
     src_mask = (src == padding_idx).unsqueeze(-2).type(
-        torch.FloatTensor)  # [batch, 1, seq_len]
+        torch.FloatTensor)  # [batch, 1 (unsqueeze(-2) - ap chot), seq_len]
     # Create mask for target sequence padding
     trg_mask = (trg == padding_idx).unsqueeze(-2).type(
         torch.FloatTensor)  # [batch, 1, seq_len]
@@ -106,11 +104,14 @@ def loss_function(x, trg, padding_idx, criterion):
     # Return average loss over non-padding positions
     return loss.mean()
 
-# 3GPP Channel PowerNormalize function
-def power_normalize(signal):
-    """Normalize signal power to unit average power."""
-    power = torch.mean(torch.abs(signal) ** 2)
-    return signal / torch.sqrt(power) if power > 0 else signal
+# power_normalize function
+def power_normalize(x):
+    x_square = torch.mul(x, x)
+    power = torch.mean(x_square).sqrt()
+    if power > 1:
+        x = torch.div(x, power)
+
+    return x
 
 # DeepSC CHannel for 3GPP
 class DeepSCChannel:
@@ -456,7 +457,7 @@ class Channels():
 
         return Rx_sig_equalized, batch_snr_db
     
-def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None):
+def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
@@ -475,8 +476,15 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None
             snr_db=random.uniform(0, 20),  # Random SNR for robustness
         )
 
+    # ===== freeze mask_perturbation_model, train DeepSC + ACN (calibration) =====
+    for name, p in model.named_parameters():
+        if "mask_perturbation_model" in name:
+            p.requires_grad = False
+        else:
+            p.requires_grad = True  # includes calibration (ACN)
+
     # remove former gradient
-    opt.zero_grad()
+    opt_deepsc.zero_grad()
 
     # mask for transformer
     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
@@ -484,7 +492,7 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None
     # encoder + channel encoder
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = PowerNormalize(channel_enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
 
     # Channel transmission
     if channel == 'AWGN':
@@ -512,40 +520,58 @@ def train_step(model, src, trg, n_var, pad, opt, criterion, channel, mi_net=None
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
-    dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-                               src_mask)
+    dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                               src_mask, use_perturb=False)
     pred = model.dense(dec_output)
     ntokens = pred.size(-1)
 
-    # calculate loss
+    #calculate loss
     loss = loss_function(pred.contiguous().view(-1, ntokens),
                          trg_real.contiguous().view(-1), pad, criterion)
     
-    # Optional mutual information loss
-    if mi_net is not None:
-        mi_net.eval()
-        joint, marginal = sample_batch(Tx_sig, Rx_sig)
-        mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
-        loss_mine = -mi_lb
-        loss = loss + 0.0009 * loss_mine
-
-    # backprop + update
     loss.backward()
-    opt.step()
+    opt_deepsc.step()
 
     return loss.item(), snr
 
-def train_mi(model, mi_net, src, n_var, padding_idx, opt, channel, iteration=0):
-    mi_net.train()
-    opt.zero_grad()
-
+def train_mask(model, src, trg, n_var, pad, opt_mask, criterion, channel):
+    model.train()
+    trg_inp = trg[:, :-1]
+    trg_real = trg[:, 1:]
     channels = Channels()
-    src_mask = (src == padding_idx).unsqueeze(-2).type(torch.FloatTensor).to(
-        device)
+
+    if channel == '3GPP':
+        # Random distance for diversity
+        distance = random.uniform(10, 2000)
+        deepsc_channel = DeepSCChannel(
+            scenario='UMa',
+            tx_pos=(0, 0, 25),
+            rx_pos=(distance, 0, 1.5),
+            fc=3.5,
+            tx_power_dB=23,
+            seed=None,
+            snr_db=random.uniform(0, 20),  # Random SNR for robustness
+        )
+
+    # ===== chỉ train mask_perturbation_model, freeze mọi thứ còn lại (kể cả ACN) =====
+    for name, p in model.named_parameters():
+        if "mask_perturbation_model" in name:
+            p.requires_grad = True
+        else:
+            p.requires_grad = False  # freeze DeepSC + calibration (ACN)
+
+    # remove former gradient
+    opt_mask.zero_grad()
+
+    # mask for transformer
+    src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
+
+    # encoder + channel encoder
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
 
-    Tx_sig = PowerNormalize(channel_enc_output)
+    # Channel transmission
     if channel == 'AWGN':
         Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
     elif channel == 'Rayleigh':
@@ -554,21 +580,41 @@ def train_mi(model, mi_net, src, n_var, padding_idx, opt, channel, iteration=0):
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
     elif channel == 'TimeVaryingRician':
         Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
-    else:
-        raise ValueError(
-            "Please choose from AWGN, Rayleigh, Rician, or TimeVaryingRician")
+    elif channel == '3GPP':
+        batch_size, seq_len, features = Tx_sig.shape
+        assert features % 2 == 0, "Features must be even"
+        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
+        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
+                                       Tx_sig_complex[..., 1])
+        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
+            Tx_sig_complex)
+        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
+        snr = 10 * np.log10(
+            rx_signal_power / noise_power) if noise_power > 0 else -100
+        # Log for debugging
+        # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
+        #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
+
+    # channel decoder + decoder
+    channel_dec_output = model.channel_decoder(Rx_sig)
     
-    joint, marginal = sample_batch(Tx_sig, Rx_sig)
-    mi_lb, _, _ = mutual_information(joint, marginal, mi_net)
-    mi_bits = mi_lb / torch.log(torch.tensor(2.0))
-    loss_mine = -mi_lb
+    out_perturb, m_t = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                               src_mask, use_perturb=True)
+    
+    out_perturb = model.dense(out_perturb)
 
-    loss_mine.backward()
-    torch.nn.utils.clip_grad_norm_(mi_net.parameters(), 10.0)
-    opt.step()
+    loss_perturb = loss_function(out_perturb.contiguous().view(-1, out_perturb.size(-1)),
+                            trg_real.contiguous().view(-1), pad, criterion)
+        
+    L_c = ((1 - m_t)**2).mean()
 
-    return loss_mine.item(), mi_bits.item()
+    loss_mask = -loss_perturb + 0.1 * L_c
 
+    # ===== Tối ưu riêng cho mask =====
+    loss_mask.backward()
+    opt_mask.step()
+
+    return loss_mask.item(), snr
 
 def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
     model.eval()
@@ -593,7 +639,7 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
         enc_output = model.encoder(src, src_mask)
         channel_enc_output = model.channel_encoder(enc_output)
-        Tx_sig = PowerNormalize(channel_enc_output)
+        Tx_sig = power_normalize(channel_enc_output)
 
         if channel == 'AWGN':
             Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
@@ -620,12 +666,14 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
             #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
         channel_dec_output = model.channel_decoder(Rx_sig)
-        dec_output = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
-                                   src_mask)
+        dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
+                                   src_mask, use_perturb=False)
         pred = model.dense(dec_output)
         ntokens = pred.size(-1)
+
+        # calculate loss
         loss = loss_function(pred.contiguous().view(-1, ntokens),
-                             trg_real.contiguous().view(-1), pad, criterion)
+                            trg_real.contiguous().view(-1), pad, criterion)
 
     return loss.item(), snr
 
@@ -666,7 +714,7 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
     # Encoder and channel encoding (same as train_step)
     enc_output = model.encoder(src, src_mask)
     channel_enc_output = model.channel_encoder(enc_output)
-    Tx_sig = PowerNormalize(
+    Tx_sig = power_normalize(
         channel_enc_output)  # Assuming power_normalize is defined
 
     # Channel simulation
@@ -719,7 +767,7 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
             torch.FloatTensor).to(device)
         combined_mask = torch.max(trg_mask, look_ahead_mask)
         # Generate next token
-        dec_output = model.decoder(outputs, memory, combined_mask, src_mask)
+        dec_output, _ = model.decoder(outputs, memory, combined_mask, src_mask)
         pred = model.dense(dec_output)
         # Select most probable token for next position
         prob = pred[:, -1:, :]  # (batch_size, 1, vocab_size)
@@ -906,7 +954,7 @@ def debug_greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         look_ahead_mask = subsequent_mask(outputs.size(1)).float()
         combined_mask = torch.max(trg_mask.to(device),
                                   look_ahead_mask.to(device))
-        dec_output = model.decoder(outputs, memory, combined_mask, None)
+        dec_output, _ = model.decoder(outputs, memory, combined_mask, None)
         pred = model.dense(dec_output)
         _, next_word = torch.max(pred[:, -1:, :], dim=-1)
         outputs = torch.cat([outputs, next_word.to(device)], dim=1)

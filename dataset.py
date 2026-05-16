@@ -77,6 +77,9 @@ def collate_data(batch):
      # Convert NumPy array to a PyTorch tensor for model input
     return torch.from_numpy(sents)
 
+import numpy as np
+import torch
+
 def collate_pair_data(batch):
     batch_size = len(batch)
     target_len = 35
@@ -107,4 +110,5 @@ def collate_pair_data(batch):
         label_tensor[i, :label_len] = labels[i][:label_len]
 
     return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
+
 
