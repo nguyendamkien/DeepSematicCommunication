@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Jun  1 09:47:54 2020
-
-@author: HQ Xie
-utils.py
-"""
 import json
 import math
 import pickle
@@ -911,7 +904,7 @@ def debug_greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         print(f"[Warning] Pre-channel modulation analysis failed: {e}")
 
     # Power Normalization
-    Tx_sig = PowerNormalize(channel_enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
     print_step("Transmitted Signal", Tx_sig)
 
     # Channel Simulation with Detailed SNR

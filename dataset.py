@@ -84,7 +84,7 @@ def collate_pair_data(batch):
     batch_size = len(batch)
     target_len = 35
 
-    # 🔥 Tách src, trg, và labels
+    # Tách src, trg, và labels
     noise_sents = [item[0] for item in batch]
     trg_sents = [item[1] for item in batch]
     labels = [item[2] for item in batch]
