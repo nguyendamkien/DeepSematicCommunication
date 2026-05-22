@@ -1,23 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Mon May 25 20:33:53 2020
-
-@author: HQ Xie
-这是一个Transformer的网络结构
-"""
-"""
-Transformer includes:
-    Encoder
-        1. Positional coding
-        2. Multihead-attention
-        3. PositionwiseFeedForward
-    Decoder
-        1. Positional coding
-        2. Multihead-attention
-        3. Multihead-attention
-        4. PositionwiseFeedForward
-"""
-
 import math
 import torch
 import torch.nn as nn
@@ -395,7 +375,7 @@ class Encoder(nn.Module):
             [EncoderLayer(d_model, num_heads, dff, dropout)
              for _ in range(num_layers)])
         
-    def forward(self, x, src_mask):
+    def forward(self, x, src_mask, emb_src=None):
         """Pass the input (and mask) through each layer in turn."""
         """
         Input:
@@ -405,8 +385,11 @@ class Encoder(nn.Module):
         Output: [batch_size, seq_len, d_model]
         """
         # the input size of x is [batch_size, seq_len]
-        x = self.embedding(x) * math.sqrt(self.d_model)
-        x = self.pos_encoding(x)
+        if emb_src is None:
+            x = self.embedding(x) * math.sqrt(self.d_model)
+            x = self.pos_encoding(x)
+        else:
+            x = emb_src
 
         for enc_layer in self.enc_layers:
             x = enc_layer(x, src_mask)

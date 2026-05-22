@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Jun  1 09:47:54 2020
-
-@author: HQ Xie
-utils.py
-"""
 import json
 import math
 import pickle
@@ -112,189 +105,6 @@ def power_normalize(x):
         x = torch.div(x, power)
 
     return x
-
-# DeepSC CHannel for 3GPP
-class DeepSCChannel:
-    def __init__(self, scenario='UMa', tx_pos=(0, 0, 25), rx_pos=(100, 0, 1.5),
-                 fc=3.5, tx_power_dB=23, seed=None, snr_db=10):
-        self.scenario = scenario
-        self.tx_pos = np.array(tx_pos)
-        self.rx_pos = np.array(rx_pos)
-        self.fc = fc  # Carrier frequency in GHz
-        self.tx_power_dB = tx_power_dB
-        self.seed = seed
-        self.snr_db = snr_db
-        self.rng = np.random.default_rng(seed)
-        self.c = 3e8  # Speed of light in m/s
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
-
-        # 3GPP UMa parameters
-        self.r_tau = 2.5  # Delay scaling
-        # Move delay spread parameters to a method for LOS/NLOS adjustment
-        self.set_delay_spread_params()  # New method to set mu_lgDS and sigma_lgDS
-        self.mu_K = 9
-        self.sigma_K = 5  # Corrected from 3.5 to 5 per Table 7.5-6
-
-        # Compute distances
-        self.dist_2D = np.sqrt(
-            (tx_pos[0] - rx_pos[0]) ** 2 + (tx_pos[1] - rx_pos[1]) ** 2)
-        self.dist_3D = np.sqrt(self.dist_2D ** 2 + (tx_pos[2] - rx_pos[2]) ** 2)
-
-        self.los = self._compute_los()
-        self.pathloss = self._compute_pathloss()
-        self.ds = self._compute_delay_spread()
-        self.k_factor = self._compute_k_factor()
-        # Fix number of clusters
-        self.num_clusters = 20 if self.los == 0 else 12  # Corrected from 12/20
-
-    def set_delay_spread_params(self):
-        """Set delay spread parameters based on LOS/NLOS state (Table 7.5-6)."""
-        if self.los == 0:  # LOS
-            self.mu_lgDS = -6.955 - 0.0963 * np.log10(self.fc)
-            self.sigma_lgDS = 0.66
-        else:  # NLOS
-            self.mu_lgDS = -6.44 - 0.086 * np.log10(self.fc)
-            self.sigma_lgDS = 0.56
-
-    def _compute_los(self):
-        if self.scenario == 'UMa':
-            h_ut = self.rx_pos[2]
-            if self.dist_2D <= 18:
-                Pr_LOS = 1
-            else:
-                Pr_LOS = (18 / self.dist_2D + np.exp(-self.dist_2D / 36) * (
-                        1 - 18 / self.dist_2D)) * \
-                         (1 + (h_ut / 1.5 - 1) * (5 / 4) * (
-                                 self.dist_2D / 100) ** 3 * np.exp(
-                             -self.dist_2D / 150))  # Corrected term
-                Pr_LOS = min(1, max(0, Pr_LOS))
-        return 0 if self.rng.random() < Pr_LOS else 1
-
-    def _compute_pathloss(self):
-        """
-        Compute path loss based on LOS or NLOS state, following 3GPP TR 38.901 UMa scenario.
-        """
-
-        # Check LOS or NLOS condition
-        los = 'LOS' if self.los == 0 else 'NLOS'
-
-        if self.scenario == 'UMa':
-            # Calculate breakpoint distance
-            h_bs = self.tx_pos[2]  # BS height (m)
-            h_ut = self.rx_pos[2]  # UE height (m)
-            h_e = 1.0  # Effective environment height (m)
-            d_bp = 4 * (h_bs - h_e) * (
-                    h_ut - h_e) * self.fc * 1e9 / self.c  # Breakpoint distance (m)
-
-            # Path loss based on LOS/NLOS
-            if los == 'LOS':
-                if 10 <= self.dist_2D <= d_bp:
-                    pathloss = 28.0 + 22 * np.log10(
-                        self.dist_3D) + 20 * np.log10(self.fc)
-                    sigma_sf = 4  # Shadow fading STD for LOS
-                elif d_bp < self.dist_2D <= 5000:
-                    pathloss = 28.0 + 40 * np.log10(
-                        self.dist_3D) + 20 * np.log10(self.fc) - \
-                               9 * np.log10(d_bp ** 2 + (h_bs - h_ut) ** 2)
-                    sigma_sf = 4  # Shadow fading STD for LOS
-                else:
-                    pathloss = float('inf')  # Beyond 5000m
-            else:
-                if 10 <= self.dist_2D <= 5000:
-                    # Compute LOS path loss for comparison
-                    if self.dist_2D <= d_bp:
-                        PL_LOS = 28.0 + 22 * np.log10(
-                            self.dist_3D) + 20 * np.log10(self.fc)
-                    else:
-                        PL_LOS = 28.0 + 40 * np.log10(
-                            self.dist_3D) + 20 * np.log10(self.fc) - \
-                                 9 * np.log10(d_bp ** 2 + (h_bs - h_ut) ** 2)
-                    # Compute NLOS path loss
-                    PL_NLOS = 13.54 + 39.08 * np.log10(
-                        self.dist_3D) + 20 * np.log10(self.fc) - \
-                              0.6 * (h_ut - 1.5)
-                    pathloss = max(PL_LOS, PL_NLOS)
-                    sigma_sf = 6  # Shadow fading STD for NLOS
-                else:
-                    pathloss = float('inf')  # Beyond 5000m
-
-            # Apply shadow fading
-            if pathloss != float('inf'):
-                shadowing = self.rng.normal(0, sigma_sf)
-                shadowing = np.clip(shadowing, -3 * sigma_sf, 3 * sigma_sf)
-                pathloss += shadowing
-                pathloss = max(0, min(pathloss, 200))
-            else:
-                pathloss = 200  # Cap at 200 dB
-
-        return pathloss
-
-    def _compute_delay_spread(self):
-        lgDS = self.rng.normal(self.mu_lgDS, self.sigma_lgDS)
-        return 10 ** lgDS  # Convert to seconds
-
-    def _compute_k_factor(self):
-        if self.los == 0:
-            K_dB = self.rng.normal(self.mu_K, self.sigma_K)
-            return max(0, K_dB)
-        return 0
-
-    def generate_cir(self, sample_rate=1e6):
-        cir_rng = np.random.default_rng(self.seed)
-        # Cluster delays
-        cluster_delay = -self.r_tau * self.ds * np.log(
-            cir_rng.uniform(size=self.num_clusters))
-        cluster_delay = np.sort(cluster_delay - min(cluster_delay))
-        if self.los == 0:
-            cluster_delay = cluster_delay / (0.7705 - 0.0433 * self.k_factor +
-                                             0.0002 * self.k_factor ** 2 + 0.000017 * self.k_factor ** 3)
-
-        # Cluster powers with shadow fading
-        zeta = 3  # dB, per Table 7.5-6
-        shadow_fading = cir_rng.normal(0, zeta, size=self.num_clusters)
-        P_n = np.exp(-cluster_delay * (self.r_tau - 1) / (
-                self.r_tau * self.ds)) * 10 ** (-shadow_fading / 10)
-        P_n = P_n / np.sum(P_n)
-        if self.los == 0:
-            K_linear = 10 ** (self.k_factor / 10)
-            P_n = (1 / (K_linear + 1)) * P_n
-            P_n[0] += K_linear / (K_linear + 1)
-
-        # Apply path loss and transmit power
-        gain_dB = self.tx_power_dB - self.pathloss
-        gain_linear = max(10 ** (gain_dB / 10), 1e-20)
-        P_n *= gain_linear
-
-        # Generate tap gains
-        phases = cir_rng.uniform(0, 2 * np.pi, size=self.num_clusters)
-        tap_gains = np.sqrt(P_n) * (np.cos(phases) + 1j * np.sin(phases))
-        tap_indices = np.round(cluster_delay * sample_rate).astype(int)
-
-        return tap_indices, tap_gains
-
-    def apply_channel(self, tx_symbols, sample_rate=1e6):
-        if not torch.is_complex(tx_symbols):
-            tx_symbols = tx_symbols.type(torch.complex64)
-        tx_symbols = tx_symbols.to(self.device)
-
-        tap_indices, tap_gains = self.generate_cir(sample_rate)
-        rx_symbols = torch.zeros_like(tx_symbols, dtype=torch.complex64,
-                                      device=self.device)
-        for idx, gain in zip(tap_indices, tap_gains):
-            if idx < tx_symbols.shape[1]:
-                shifted_symbols = torch.roll(tx_symbols, shifts=idx, dims=1)
-                rx_symbols += shifted_symbols * gain
-
-        # Add AWGN
-        rx_signal_power = torch.mean(torch.abs(rx_symbols) ** 2).item()
-        snr_linear = 10 ** (self.snr_db / 10)
-        noise_power = rx_signal_power / snr_linear if rx_signal_power > 0 else 1e-10
-        sigma = np.sqrt(noise_power / 2)
-        noise = torch.randn_like(rx_symbols, dtype=torch.complex64) * sigma
-        rx_symbols += noise
-
-        return rx_symbols, rx_signal_power, noise_power
 
 class Channels():
     def AWGN(self, Tx_sig, n_var):
@@ -457,24 +267,11 @@ class Channels():
 
         return Rx_sig_equalized, batch_snr_db
     
-def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
+def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel, epsilon, lamda_adv):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
     channels = Channels()
-
-    if channel == '3GPP':
-        # Random distance for diversity
-        distance = random.uniform(10, 2000)
-        deepsc_channel = DeepSCChannel(
-            scenario='UMa',
-            tx_pos=(0, 0, 25),
-            rx_pos=(distance, 0, 1.5),
-            fc=3.5,
-            tx_power_dB=23,
-            seed=None,
-            snr_db=random.uniform(0, 20),  # Random SNR for robustness
-        )
 
     # ===== freeze mask_perturbation_model, train DeepSC + ACN (calibration) =====
     for name, p in model.named_parameters():
@@ -489,8 +286,13 @@ def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
     # mask for transformer
     src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
 
+    # === Lấy X_embed ===
+    emb = model.encoder.embedding(src) * math.sqrt(model.encoder.d_model)
+    emb = model.encoder.pos_encoding(emb)
+    emb.retain_grad()
+
     # encoder + channel encoder
-    enc_output = model.encoder(src, src_mask)
+    enc_output = model.encoder(src, src_mask, emb_src=emb)
     channel_enc_output = model.channel_encoder(enc_output)
     Tx_sig = power_normalize(channel_enc_output)
 
@@ -503,20 +305,6 @@ def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
     elif channel == 'TimeVaryingRician':
         Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
-    elif channel == '3GPP':
-        batch_size, seq_len, features = Tx_sig.shape
-        assert features % 2 == 0, "Features must be even"
-        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
-        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
-                                       Tx_sig_complex[..., 1])
-        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
-            Tx_sig_complex)
-        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
-        snr = 10 * np.log10(
-            rx_signal_power / noise_power) if noise_power > 0 else -100
-        # Log for debugging
-        # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
-        #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
@@ -529,29 +317,52 @@ def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel):
     loss = loss_function(pred.contiguous().view(-1, ntokens),
                          trg_real.contiguous().view(-1), pad, criterion)
     
-    loss.backward()
+    # Backward lần 1 — giữ graph để dùng lại cho loss_total
+    opt_deepsc.zero_grad()
+    loss.backward(retain_graph=True)
+
+    # === Tạo adversarial embedding ===
+    grad = emb.grad.detach()
+    norm = torch.norm(grad)
+    delta = epsilon * grad / norm if norm != 0 else torch.zeros_like(grad)
+    emb_adv = (emb + delta).detach()
+
+    # === Forward adversarial ===
+    enc_output_adv = model.encoder(src, src_mask, emb_src=emb_adv)
+    channel_enc_output_adv = model.channel_encoder(enc_output_adv)
+    Tx_sig_adv = power_normalize(channel_enc_output_adv)
+
+    if channel == 'AWGN':
+        Rx_sig_adv, _ = channels.AWGN(Tx_sig_adv, n_var)
+    elif channel == 'Rayleigh':
+        Rx_sig_adv, _ = channels.Rayleigh(Tx_sig_adv, n_var)
+    elif channel == 'Rician':
+        Rx_sig_adv, _ = channels.Rician(Tx_sig_adv, n_var)
+    elif channel == 'TimeVaryingRician':
+        Rx_sig_adv, _ = channels.TimeVaryingRician(Tx_sig_adv, n_var)
+    
+    channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
+    dec_output_adv, _ = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask,
+                                       src_mask, use_perturb=False)
+    pred_adv = model.dense(dec_output_adv)
+
+    loss_adv = loss_function(pred_adv.contiguous().view(-1, ntokens),
+                             trg_real.contiguous().view(-1), pad, criterion)
+
+    # === Combine + update ===
+    loss_total = loss + lamda_adv * loss_adv
+    opt_deepsc.zero_grad()
+    loss_total.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     opt_deepsc.step()
 
-    return loss.item(), snr
+    return loss.item(), loss_adv.item(), snr
 
 def train_mask(model, src, trg, n_var, pad, opt_mask, criterion, channel):
     model.train()
     trg_inp = trg[:, :-1]
     trg_real = trg[:, 1:]
     channels = Channels()
-
-    if channel == '3GPP':
-        # Random distance for diversity
-        distance = random.uniform(10, 2000)
-        deepsc_channel = DeepSCChannel(
-            scenario='UMa',
-            tx_pos=(0, 0, 25),
-            rx_pos=(distance, 0, 1.5),
-            fc=3.5,
-            tx_power_dB=23,
-            seed=None,
-            snr_db=random.uniform(0, 20),  # Random SNR for robustness
-        )
 
     # ===== chỉ train mask_perturbation_model, freeze mọi thứ còn lại (kể cả ACN) =====
     for name, p in model.named_parameters():
@@ -580,20 +391,6 @@ def train_mask(model, src, trg, n_var, pad, opt_mask, criterion, channel):
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
     elif channel == 'TimeVaryingRician':
         Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
-    elif channel == '3GPP':
-        batch_size, seq_len, features = Tx_sig.shape
-        assert features % 2 == 0, "Features must be even"
-        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
-        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
-                                       Tx_sig_complex[..., 1])
-        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
-            Tx_sig_complex)
-        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
-        snr = 10 * np.log10(
-            rx_signal_power / noise_power) if noise_power > 0 else -100
-        # Log for debugging
-        # print(f"Train - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
-        #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
@@ -623,19 +420,6 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
         trg_real = trg[:, 1:]
         channels = Channels()
 
-        if channel == '3GPP':
-            # Random distance for diversity, fixed SNR for validation
-            distance = random.uniform(10, 2000)
-            deepsc_channel = DeepSCChannel(
-                scenario='UMa',
-                tx_pos=(0, 0, 25),
-                rx_pos=(distance, 0, 1.5),
-                fc=3.5,
-                tx_power_dB=23,
-                seed=None,
-                snr_db=10,  # Fixed SNR at 10 dB for validation
-            )
-
         src_mask, look_ahead_mask = create_masks(src, trg_inp, pad)
         enc_output = model.encoder(src, src_mask)
         channel_enc_output = model.channel_encoder(enc_output)
@@ -649,22 +433,7 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
             Rx_sig, snr = channels.Rician(Tx_sig, n_var)
         elif channel == 'TimeVaryingRician':
             Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
-        elif channel == '3GPP':
-            batch_size, seq_len, features = Tx_sig.shape
-            assert features % 2 == 0, "Features must be even"
-            Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
-            Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
-                                           Tx_sig_complex[..., 1])
-            Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
-                Tx_sig_complex)
-            Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len,
-                                                     features)
-            snr = 10 * np.log10(
-                rx_signal_power / noise_power) if noise_power > 0 else -100
-            # Log for debugging
-            # print(f"Val - Distance: {distance:.2f} m, SNR: {snr:.2f} dB, "
-            #       f"Pathloss: {deepsc_channel.pathloss:.2f} dB")
-
+        
         channel_dec_output = model.channel_decoder(Rx_sig)
         dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
                                    src_mask, use_perturb=False)
@@ -718,30 +487,7 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         channel_enc_output)  # Assuming power_normalize is defined
 
     # Channel simulation
-    if channel == '3GPP':
-        # Fixed distance and SNR for validation
-        distance = 1000  # Fixed at 1000 meters
-        snr_db = 10  # Fixed at 10 dB
-        deepsc_channel = DeepSCChannel(
-            scenario='UMa',
-            tx_pos=(0, 0, 25),
-            rx_pos=(distance, 0, 1.5),
-            fc=3.5,
-            tx_power_dB=23,
-            seed=None,
-            snr_db=snr_db,
-        )
-        batch_size, seq_len, features = Tx_sig.shape
-        assert features % 2 == 0, "Features must be even"
-        Tx_sig_complex = Tx_sig.view(batch_size, seq_len, features // 2, 2)
-        Tx_sig_complex = torch.complex(Tx_sig_complex[..., 0],
-                                       Tx_sig_complex[..., 1])
-        Rx_sig, rx_signal_power, noise_power = deepsc_channel.apply_channel(
-            Tx_sig_complex)
-        Rx_sig = torch.view_as_real(Rx_sig).view(batch_size, seq_len, features)
-        snr = 10 * np.log10(
-            rx_signal_power / noise_power) if noise_power > 0 else -100
-    elif channel == 'AWGN':
+    if channel == 'AWGN':
         Rx_sig, snr = channels.AWGN(Tx_sig, n_var)
     elif channel == 'Rayleigh':
         Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
@@ -911,7 +657,7 @@ def debug_greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         print(f"[Warning] Pre-channel modulation analysis failed: {e}")
 
     # Power Normalization
-    Tx_sig = PowerNormalize(channel_enc_output)
+    Tx_sig = power_normalize(channel_enc_output)
     print_step("Transmitted Signal", Tx_sig)
 
     # Channel Simulation with Detailed SNR

@@ -28,10 +28,6 @@ from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
-# parser.add_argument('--checkpoint-path',
-#                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
-#                     type=str)
-# parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
                     default='/kaggle/working/checkpoints/deepsc-AWGN',
                     type=str)
@@ -275,8 +271,8 @@ def performance(args, SNR, net):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    SNR = [0, 3, 6, 9, 12, 15, 18]
-    # SNR = [18]
+    # SNR = [0, 3, 6, 9, 12, 15, 18]
+    SNR = [18]
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
     args.vocab_file = './data/' + args.vocab_file
     vocab = json.load(open(args.vocab_file, 'rb'))
