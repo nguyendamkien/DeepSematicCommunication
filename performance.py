@@ -28,10 +28,6 @@ from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
-# parser.add_argument('--checkpoint-path',
-#                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
-#                     type=str)
-# parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
                     default='/kaggle/working/checkpoints/deepsc-AWGN',
                     type=str)
