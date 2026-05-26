@@ -1,12 +1,3 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 -*-
-"""
-@Author: Huiqiang Xie
-@File: performance.py
-@Time: 2021/4/1 11:48
-@Modified: 2025/03/25 - Process one SNR at a time and save results incrementally
-"""
-
 import argparse
 import gc
 import json

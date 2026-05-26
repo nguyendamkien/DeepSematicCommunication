@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-"create mask nt, perturb attention"
+# create mask m_t, perturb attention
 class MaskPerturbation(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -63,8 +63,6 @@ class AttentionCalibration(nn.Module):
     def __init__(self, d_model, num_heads):
         super().__init__()
         self.num_heads = num_heads
-        # Wg and bg are layer-level trainable parameters (vary among layers).
-        # Output dim = num_heads so each head gets its own scalar gate.
         self.gate = nn.Linear(d_model, num_heads)
 
     def forward(self, Q, attn, attn_cal):
@@ -166,8 +164,6 @@ class CalibratedMultiHeadAttention(nn.Module):
         p_attn = F.softmax(scores, dim=-1)
         return torch.matmul(p_attn, value), p_attn
     
-# loss_mask = - loss_nmt(attn_perturbed) + alpha * torch.norm(1 - mask)
-
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
 
@@ -427,12 +423,20 @@ class Decoder(nn.Module):
         x = self.embedding(x) * math.sqrt(self.d_model)  # Scale embedding
         x = self.pos_encoding(x)  # Add positional encoding
 
+        # # Pass through each decoder layer
+        # m_t = None
+        # for dec_layer in self.dec_layers:
+        #     x, m_t = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
+
+        # return x, m_t  # Final decoder output and mask perturbation
+    
         # Pass through each decoder layer
-        m_t = None
+        m_t_list = []
         for dec_layer in self.dec_layers:
             x, m_t = dec_layer(x, memory, look_ahead_mask, trg_padding_mask, use_perturb)
+            m_t_list.append(m_t)
 
-        return x, m_t  # Final decoder output and mask perturbation
+        return x, torch.stack(m_t_list)  # (num_layers, batch, tgt_len, src_len)
     
 class ChannelDecoder(nn.Module):
     """Channel decoder for converting channel-coded features back to semantic space

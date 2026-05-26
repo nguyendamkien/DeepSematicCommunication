@@ -75,7 +75,7 @@ def subsequent_mask(size):
 def create_masks(src, trg, padding_idx):
     # Create mask for source sequence padding - for encoder to mask pad
     src_mask = (src == padding_idx).unsqueeze(-2).type(
-        torch.FloatTensor)  # [batch, 1 (unsqueeze(-2) - ap chot), seq_len]
+        torch.FloatTensor)  # [batch, 1 (unsqueeze(-2)), seq_len]
     # Create mask for target sequence padding
     trg_mask = (trg == padding_idx).unsqueeze(-2).type(
         torch.FloatTensor)  # [batch, 1, seq_len]
@@ -552,7 +552,6 @@ def save_evaluation_scores(args, SNR, bleu_score, similarity_score, method,
     results_df = pd.DataFrame({
         'SNR': SNR,
         f'BLEU-{bleu_ngram}_Score': bleu_score,
-        # Label BLEU column with n-gram level
         'Similarity_Score': similarity_score
     })
 
@@ -759,7 +758,6 @@ def list_checkpoints(checkpoint_dir, device=torch.device(
             epoch = checkpoint.get('epoch', None)
             train_loss = checkpoint.get('train_loss', None)
             val_loss = checkpoint.get('loss', None)
-            # mi_bits = checkpoint.get('mi_bits', None)
 
             # Extract timestamp from filename
             timestamp_str = ckpt.split('checkpoint_')[-1].replace('.pth', '')
@@ -853,28 +851,3 @@ def load_checkpoint(checkpoint_dir, mode='latest'):
     else:
         print("No valid checkpoint found for the specified mode.")
         return None
-    
-def plot_bleu_vs_snr(data_dict,
-                     title="BLEU (1-grams) versus SNR over Time-Varying Rician Channel",
-                     xlabel="SNR (dB)", ylabel="BLEU (1-grams) with M = 3",
-                     colors=None):
-    snr_values = np.array([0, 3, 6, 9, 12, 15, 18])
-    if colors is None:
-        colors = ['black', 'orange', 'blue']
-
-    plt.figure(figsize=(8, 6))  # Consistent figure size
-    for idx, (label, bleu_scores) in enumerate(data_dict.items()):
-        plt.plot(snr_values, bleu_scores, marker='o', color=colors[idx],
-                 label=label)
-
-    plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel(ylabel, fontsize=14)
-    plt.title(title, fontsize=16)
-    plt.xticks(snr_values)
-    plt.grid(True, linestyle='--', alpha=0.7)  # Consistent grid style
-    plt.legend(fontsize=12,
-               loc='best')  # Move legend to best position to avoid overlap
-    plt.ylim(-0.05, 0.99)  # Set y-axis limit to avoid 1 and accommodate data
-    plt.savefig('figure1.png')  # Ensure unique filename if needed
-    plt.show()
-    plt.close()

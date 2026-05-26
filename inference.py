@@ -39,66 +39,66 @@ parser.add_argument('--num-heads', default=8, type=int)
 parser.add_argument('--epochs', default=50, type=int)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def inference(args, snr, net):
-    # Initialize metrics calculators
-    similarity = Similarity(
-        batch_size=1)  # Small batch size for single sentences
-    bleu_score_calc = BleuScore(1, 0, 0, 0)  # 1-gram BLEU score
+# def inference(args, snr, net):
+#     # Initialize metrics calculators
+#     similarity = Similarity(
+#         batch_size=1)  # Small batch size for single sentences
+#     bleu_score_calc = BleuScore(1, 0, 0, 0)  # 1-gram BLEU score
 
-    # Load the test dataset
-    test_eur = EurDataset('test')
-    test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
-                               num_workers=0,
-                               pin_memory=True, collate_fn=collate_pair_data)
+#     # Load the test dataset
+#     test_eur = EurDataset('test')
+#     test_iterator = DataLoader(test_eur, batch_size=args.batch_size,
+#                                num_workers=0,
+#                                pin_memory=True, collate_fn=collate_pair_data)
     
-    # Initialize sequence-to-text converter using vocabulary
-    StoT = SeqtoText(token_to_idx, end_idx)
+#     # Initialize sequence-to-text converter using vocabulary
+#     StoT = SeqtoText(token_to_idx, end_idx)
 
-    net.eval()
-    results = []  # To store input-output pairs for observation
-    noise_std = SNR_to_noise(snr)
+#     net.eval()
+#     results = []  # To store input-output pairs for observation
+#     noise_std = SNR_to_noise(snr)
 
-    print(f"Starting inference with SNR: {snr}...")
+#     print(f"Starting inference with SNR: {snr}...")
 
-    with torch.no_grad():
-        for batch_index, sents in enumerate(
-                tqdm(test_iterator, desc="Inference Progress"), start=1):
-            # Move data to the appropriate device
-            sents = sents.to(device)
+#     with torch.no_grad():
+#         for batch_index, sents in enumerate(
+#                 tqdm(test_iterator, desc="Inference Progress"), start=1):
+#             # Move data to the appropriate device
+#             sents = sents.to(device)
 
-            # Decode sentences
-            out = greedy_decode(net, sents, noise_std, args.MAX_LENGTH, pad_idx,
-                                start_idx, args.channel)
+#             # Decode sentences
+#             out = greedy_decode(net, sents, noise_std, args.MAX_LENGTH, pad_idx,
+#                                 start_idx, args.channel)
 
-            # Convert input (target) and model output to text
-            input_sentences = sents.cpu().numpy().tolist()
-            decoded_sentences = out.cpu().numpy().tolist()
+#             # Convert input (target) and model output to text
+#             input_sentences = sents.cpu().numpy().tolist()
+#             decoded_sentences = out.cpu().numpy().tolist()
 
-            input_texts = list(map(StoT.sequence_to_text, input_sentences))
-            output_texts = list(map(StoT.sequence_to_text, decoded_sentences))
+#             input_texts = list(map(StoT.sequence_to_text, input_sentences))
+#             output_texts = list(map(StoT.sequence_to_text, decoded_sentences))
 
-            # Calculate metrics
-            bleu = bleu_score_calc.compute_blue_score(input_texts, output_texts)
-            sim = similarity.compute_similarity(input_texts, output_texts)
+#             # Calculate metrics
+#             bleu = bleu_score_calc.compute_blue_score(input_texts, output_texts)
+#             sim = similarity.compute_similarity(input_texts, output_texts)
 
-            # Save input-output pairs with metrics for observation
-            for i, (input_text, output_text) in enumerate(
-                    zip(input_texts, output_texts)):
-                results.append({
-                    "Input": input_text,
-                    "Output": output_text,
-                    "BLEU": bleu[i] if isinstance(bleu, list) else bleu,
-                    "Similarity": sim[i] if isinstance(sim, list) else sim
-                })
-                print(f"\nInput: {input_text}")
-                print(f"Output: {output_text}")
-                print(
-                    f"BLEU Score: {bleu[i] if isinstance(bleu, list) else bleu:.4f}")
-                print(
-                    f"Similarity Score: {sim[i] if isinstance(sim, list) else sim:.4f}\n")
+#             # Save input-output pairs with metrics for observation
+#             for i, (input_text, output_text) in enumerate(
+#                     zip(input_texts, output_texts)):
+#                 results.append({
+#                     "Input": input_text,
+#                     "Output": output_text,
+#                     "BLEU": bleu[i] if isinstance(bleu, list) else bleu,
+#                     "Similarity": sim[i] if isinstance(sim, list) else sim
+#                 })
+#                 print(f"\nInput: {input_text}")
+#                 print(f"Output: {output_text}")
+#                 print(
+#                     f"BLEU Score: {bleu[i] if isinstance(bleu, list) else bleu:.4f}")
+#                 print(
+#                     f"Similarity Score: {sim[i] if isinstance(sim, list) else sim:.4f}\n")
 
-    print("Inference completed successfully.")
-    return results
+#     print("Inference completed successfully.")
+#     return results
 
 def debug_similarity(similarity_calculator: Similarity, sent1: str,
                      sent2: str) -> None:
@@ -157,6 +157,7 @@ def test_sample_sentences(args, net, dataloader: DataLoader,
             noise_std = SNR_to_noise(args.SNR)
             # Use debug_greedy_decode for single sample, regular greedy_decode otherwise
             if len(dataloader.dataset) == 1:
+                print('using debus greedy decode')
                 output_tokens = debug_greedy_decode(
                     net, input_batch, noise_std, args.MAX_LENGTH, pad_idx,
                     start_idx,
@@ -244,11 +245,6 @@ def interactive_test(args, snr, net):
             # Perform inference
             with torch.no_grad():
                 noise_std = SNR_to_noise(args.SNR)
-                # output_tokens = greedy_decode(net, input_tensor, noise_std,
-                #                               args.MAX_LENGTH, pad_idx,
-                #                               start_idx,
-                #                               args.channel,
-                #                               device)
                 decoded, _ = greedy_decode(
                     net, input_tensor, noise_std,
                     args.MAX_LENGTH, pad_idx, start_idx,
@@ -267,7 +263,7 @@ def interactive_test(args, snr, net):
             for t in output_tokens:
                 if t == end_idx:  # token <END>
                     break          # dừng lấy token sau <END>
-                if t == start_idx:  # bỏ <START> và token 4
+                if t == start_idx:  # bỏ <START>
                     continue
                 clean_tokens.append(t)
 
