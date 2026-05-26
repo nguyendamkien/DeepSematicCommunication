@@ -71,12 +71,6 @@ def inflect_verb(word, pos_tag):
 
     return random.choice(forms)
 
-# # 3. Detect verb bằng POS 
-# def find_verb_indices(words):
-#     pos_tags = nltk.pos_tag(words)
-#     indices = [i for i, (_, tag) in enumerate(pos_tags) if tag.startswith("VB")]
-#     return indices, pos_tags
-
 # Chèn một từ thừa (lấy từ danh sách deletion_candidates) vào trước vị trí idx.
 def insert_error(words, idx, deletion_candidates):
     extra_word = random.choice(deletion_candidates)
@@ -138,8 +132,7 @@ def introduce_errors(
     error_count_probs=(0.05, 0.07, 0.25, 0.35, 0.28),
     error_type_probs=(0.30, 0.25, 0.25, 0.20),
 ):
-    words = sentence.split()
-    labels = [0] * len(words)  
+    words = sentence.split() 
 
     error_count = multinoulli(list(error_count_probs))
 
@@ -152,50 +145,35 @@ def introduce_errors(
         if error_type == 0:
             idx = random.randint(0, len(words)-1)
             words = insert_error(words, idx, deletion_candidates)
-            labels.insert(idx, 1)  # Chèn label 1 cho từ mới
 
         elif error_type == 1:
             words, idx = verb_error(words)
-            if idx is not None:
-                labels[idx] = 1
 
         elif error_type == 2:
             if len(words) > 0:
                 idx = random.randint(0, len(words) - 1)
                 words = replace_error(words, idx, deletion_candidates)
-                labels[idx] = 1  # Đánh dấu token có lỗi
 
         elif error_type == 3:
             idx = random.randint(0, len(words) - 1)
             words.pop(idx)
-            labels.pop(idx)
 
-    return " ".join(words), labels
+    return " ".join(words)
 
 
-# Xây dựng bộ dữ liệu (noisy, clean, labels) từ danh sách câu sạch.
+# Xây dựng bộ dữ liệu (noisy, clean) từ danh sách câu sạch.
 def build_parallel_dataset(clean_sentences, top_k_vocab=500):
-    """
-    Xây dựng bộ dữ liệu (noisy, clean, labels) từ danh sách câu sạch.
-    Labels là list 0/1 cho từng token trong noisy sentence.
-
-    Trả về: list các tuple (noisy_sentence, clean_sentence, labels)
-    """
     deletion_candidates = build_deletion_candidates(
         clean_sentences, top_k=top_k_vocab
     )
 
     dataset = []
     for sent in tqdm(clean_sentences, desc="Generating noisy sentences"):
-        noisy, labels = introduce_errors(sent, deletion_candidates)
-        dataset.append((noisy, sent, labels))
+        noisy = introduce_errors(sent, deletion_candidates)
+        dataset.append((noisy, sent))
 
     return dataset
 
-
-# =========================
-# DEMO / KIỂM THỬ
-# =========================
 if __name__ == "__main__":
     clean_data = [
         "he is playing football in the park",
@@ -218,10 +196,9 @@ if __name__ == "__main__":
     print("=" * 60)
 
     dataset = build_parallel_dataset(clean_data)
-    for noisy, clean, labels in dataset:
+    for noisy, clean in dataset:
         print(f"  CLEAN : {clean}")
         print(f"  NOISY : {noisy}")
-        print(f"  LABELS: {labels}")
         print()
 
     # Kiểm tra từng loại lỗi riêng biệt

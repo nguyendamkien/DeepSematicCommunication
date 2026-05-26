@@ -82,7 +82,7 @@ def train(epoch, args, net):
     batch_count = 0
     snr_values = []
 
-    for noise_sents, clean_sents, labels in pbar:
+    for noise_sents, clean_sents in pbar:
         if stop_training:
             return True, epoch_loss, loss_adv_total, mask_loss, min(
                 snr_values) if snr_values else 0, max(
@@ -123,11 +123,10 @@ def validate(epoch, args, net, seq_to_text):
     pbar = tqdm(val_iterator)
     total = 0
     with torch.no_grad():
-        for noise_sents, clean_sents, labels in pbar:
+        for noise_sents, clean_sents in pbar:
             # print(f"Batch contains {sents.shape[0]} sentences")
             noise_sents = noise_sents.to(device)
             clean_sents = clean_sents.to(device)
-            labels = labels.to(device)
             loss, snr = val_step(net, noise_sents, clean_sents, 0.1, pad_idx, criterion,
                                  args.channel, seq_to_text)
             total += loss

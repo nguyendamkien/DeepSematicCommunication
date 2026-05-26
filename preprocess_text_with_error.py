@@ -11,7 +11,7 @@ import os
 import pickle # Save and load object Python (model, tokenizer, vocab)
 import re 
 import unicodedata # Normalize Unicode
-from tqdm import tqdm # Progress bar - thanh tien trinh
+from tqdm import tqdm # Progress bar 
 from w3lib.html import remove_tags # Remove HTML tags
 
 from generation_error import build_deletion_candidates, build_parallel_dataset
@@ -168,7 +168,7 @@ def build_vocab(sequences, token_to_idx={}, min_token_count=1, delim=' ',
     token_to_count = {}
 
     # Count frequency of each token in the dataset
-    for noise, clean, labels in sequences:
+    for noise, clean in sequences:
         for seq in (noise, clean):
             seq_tokens = tokenize(seq, delim=delim, punct_to_keep=punct_to_keep,
                                 punct_to_remove=punct_to_remove,
@@ -303,7 +303,6 @@ def main(args):
     # for noisy, clean, labels in parallel_dataset[:5]:
     #     print(f"  CLEAN : {clean}")
     #     print(f"  NOISY : {noisy}")
-    #     print(f"  LABELS: {labels}")
     #     print()
 
     # parallel_dataset = [
@@ -315,7 +314,6 @@ def main(args):
     # for noisy, clean, labels in parallel_dataset[:10]:
     #     print(f"  CLEAN : {clean}")
     #     print(f"  NOISY : {noisy}")
-    #     print(f"  LABELS: {labels}")
     #     print()
 
     print('Build Vocab')
@@ -336,7 +334,7 @@ def main(args):
     print('Start encoding text')
     results = []
     # Encode each sentence into token indices
-    for noise, clean, labels in tqdm(parallel_dataset):
+    for noise, clean in tqdm(parallel_dataset):
         noise_tokens = tokenize(
             noise,
             punct_to_keep=[';', ','],
@@ -350,10 +348,7 @@ def main(args):
         noise_ids = [token_to_idx[w] for w in noise_tokens]
         clean_ids = [token_to_idx[w] for w in clean_tokens]
 
-        # ✅ THÊM START + END LABEL
-        labels = [0] + labels + [0]
-
-        results.append((noise_ids, clean_ids, labels))
+        results.append((noise_ids, clean_ids))
 
     print('Writing Data')
     # Split the data into train, val and test sets
