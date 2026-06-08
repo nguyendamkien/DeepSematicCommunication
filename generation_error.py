@@ -94,11 +94,6 @@ def replace_error(words, idx, deletion_candidates):
 
 
 def verb_error(words):
-    """
-    VerbError: Tìm các động từ trong câu, chọn ngẫu nhiên một động từ,
-    thay thế bằng một dạng chia khác của chính động từ đó.
-    Nếu câu không có động từ, không thay đổi gì.
-    """
 
     # POS tagging - hàm gán nhãn từ loại
     pos_tags = nltk.pos_tag(words)

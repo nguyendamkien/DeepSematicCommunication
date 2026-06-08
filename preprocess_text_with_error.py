@@ -1,7 +1,7 @@
 import sys # interacting with the python system
 from collections import Counter # count frequency of each element
 
-import nltk # Natural Languages Toolkit - library for NLP
+import nltk # library for NLP
 from matplotlib import pyplot as plt
 import random
 
@@ -186,29 +186,29 @@ def build_vocab(sequences, token_to_idx={}, min_token_count=1, delim=' ',
     return token_to_idx
 
 # Encode text sequences into numerical representations based on vocabulary
-def encode(seq_tokens, token_to_idx, allow_unk=False):
-    seq_idx = []
-    for token in seq_tokens:
-        if token not in token_to_idx:
-            if allow_unk:
-                token = '<UNK>'
-            else:
-                raise KeyError('Token "%s" not in vocab' % token)
-        seq_idx.append(token_to_idx[token])
-    return seq_idx
+# def encode(seq_tokens, token_to_idx, allow_unk=False):
+#     seq_idx = []
+#     for token in seq_tokens:
+#         if token not in token_to_idx:
+#             if allow_unk:
+#                 token = '<UNK>'
+#             else:
+#                 raise KeyError('Token "%s" not in vocab' % token)
+#         seq_idx.append(token_to_idx[token])
+#     return seq_idx
 
 
 # Decode numerical representations back into tokens
-def decode(seq_idx, idx_to_token, delim=None, stop_at_end=True):
-    tokens = []
-    for idx in seq_idx:
-        tokens.append(idx_to_token[idx])
-        if stop_at_end and tokens[-1] == '<END>':
-            break
-    if delim is None:
-        return tokens
-    else:
-        return delim.join(tokens)
+# def decode(seq_idx, idx_to_token, delim=None, stop_at_end=True):
+#     tokens = []
+#     for idx in seq_idx:
+#         tokens.append(idx_to_token[idx])
+#         if stop_at_end and tokens[-1] == '<END>':
+#             break
+#     if delim is None:
+#         return tokens
+#     else:
+#         return delim.join(tokens)
 
 
 def explore_data(sentences, vocab):

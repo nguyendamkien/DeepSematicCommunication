@@ -67,27 +67,18 @@ class AttentionCalibration(nn.Module):
 
     def forward(self, Q, attn, attn_cal):
         """
-        Implements:
-            g_t  = σ(q_t · Wg + bg)          [per query position, per head]
-            a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
-
-        Args:
-            Q       : (batch, seq_len, d_model)          – query (pre-split)
-            attn    : (batch, heads, seq_len, seq_len)   – original attention
-            attn_cal: (batch, heads, seq_len, seq_len)   – calibrated attention
-        Returns:
-            attn_comb: (batch, heads, seq_len, seq_len)  – combined attention (post-softmax)
+            Q       : (batch, seq_len, d_model)         
+            attn    : (batch, heads, seq_len, seq_len)  
+            attn_cal: (batch, heads, seq_len, seq_len)  
         """
         # g_t = σ(Q · Wg + bg)
         # Q: (batch, seq_len, d_model)
         # gate output: (batch, seq_len, num_heads)
         g = torch.sigmoid(self.gate(Q))
 
-        # Reshape to (batch, num_heads, seq_len, 1) so it broadcasts over
-        # the key-dimension of attn: (batch, heads, seq_len, seq_len)
+        # Reshape to (batch, num_heads, seq_len, 1)
         g = g.permute(0, 2, 1).unsqueeze(-1)  # (batch, heads, seq_len, 1)
 
-        # a_comb_t = g_t * a_t + (1 - g_t) * a_c_t
         attn_comb = g * attn + (1 - g) * attn_cal
 
         return attn_comb

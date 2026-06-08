@@ -181,91 +181,91 @@ class Channels():
         batch_snr_db = 10 * math.log10(snr.item())
         return Rx_sig, batch_snr_db
     
-    def TimeVaryingRician(self, Tx_sig, n_var, M_options=[3, 5, 6, 10], K=1,
-                          csi_lag=1):
-        """
-        Time-varying Rician channel with block-wise fading and lagged equalization.
-        Simulates a fast-moving receiver (e.g., 50–150 km/h) where the channel changes
-        every block (~2 ms), and equalization uses an outdated channel estimate (lagged
-        by csi_lag blocks, default=1 for ~2 ms lag, realistic for 5G with frequent pilots).
-        - Tx_sig: Input signal tensor [batch_size, sequence_length, feature_dim]
-        - n_var: Noise standard deviation
-        - M_options: List of possible block sizes (e.g., [3, 5, 6, 10])
-        - K: Rician factor (default=1 for urban mobile scenario)
-        - csi_lag: Number of blocks to lag channel estimate (default=1)
-        Returns:
-        - Rx_sig_equalized: Equalized received signal
-        - batch_snr_db: Average SNR in dB
-        """
-        batch_size, sequence_length, feature_dim = Tx_sig.shape
-        assert feature_dim % 2 == 0, f"feature_dim {feature_dim} must be even for complex symbols"
-        complex_length = sequence_length * (feature_dim // 2)
+    # def TimeVaryingRician(self, Tx_sig, n_var, M_options=[3, 5, 6, 10], K=1,
+    #                       csi_lag=1):
+    #     """
+    #     Time-varying Rician channel with block-wise fading and lagged equalization.
+    #     Simulates a fast-moving receiver (e.g., 50–150 km/h) where the channel changes
+    #     every block (~2 ms), and equalization uses an outdated channel estimate (lagged
+    #     by csi_lag blocks, default=1 for ~2 ms lag, realistic for 5G with frequent pilots).
+    #     - Tx_sig: Input signal tensor [batch_size, sequence_length, feature_dim]
+    #     - n_var: Noise standard deviation
+    #     - M_options: List of possible block sizes (e.g., [3, 5, 6, 10])
+    #     - K: Rician factor (default=1 for urban mobile scenario)
+    #     - csi_lag: Number of blocks to lag channel estimate (default=1)
+    #     Returns:
+    #     - Rx_sig_equalized: Equalized received signal
+    #     - batch_snr_db: Average SNR in dB
+    #     """
+    #     batch_size, sequence_length, feature_dim = Tx_sig.shape
+    #     assert feature_dim % 2 == 0, f"feature_dim {feature_dim} must be even for complex symbols"
+    #     complex_length = sequence_length * (feature_dim // 2)
 
-        # Select valid block size M
-        valid_M_options = [m for m in M_options if complex_length % m == 0]
-        if not valid_M_options:
-            raise ValueError(
-                f"No M in {M_options} divides complex_length {complex_length}")
-        M = random.choice(valid_M_options)
-        number_of_blocks = complex_length // M
+    #     # Select valid block size M
+    #     valid_M_options = [m for m in M_options if complex_length % m == 0]
+    #     if not valid_M_options:
+    #         raise ValueError(
+    #             f"No M in {M_options} divides complex_length {complex_length}")
+    #     M = random.choice(valid_M_options)
+    #     number_of_blocks = complex_length // M
 
-        # Reshape input signal for block-wise processing
-        Tx_sig_reshaped = Tx_sig.view(batch_size, number_of_blocks, M, 2)
+    #     # Reshape input signal for block-wise processing
+    #     Tx_sig_reshaped = Tx_sig.view(batch_size, number_of_blocks, M, 2)
 
-        # Generate block-wise fading coefficients
-        mean = math.sqrt(K / (K + 1))
-        std = math.sqrt(1 / (K + 1))
-        H_real_blocks = torch.normal(mean, std,
-                                     size=[batch_size, number_of_blocks, 1]).to(
-            device)
-        H_imag_blocks = torch.normal(mean, std,
-                                     size=[batch_size, number_of_blocks, 1]).to(
-            device)
-        H_blocks = torch.zeros(batch_size, number_of_blocks, 2, 2,
-                               device=device)
-        H_blocks[:, :, 0, 0] = H_real_blocks[:, :, 0]
-        H_blocks[:, :, 0, 1] = -H_imag_blocks[:, :, 0]
-        H_blocks[:, :, 1, 0] = H_imag_blocks[:, :, 0]
-        H_blocks[:, :, 1, 1] = H_real_blocks[:, :, 0]
+    #     # Generate block-wise fading coefficients
+    #     mean = math.sqrt(K / (K + 1))
+    #     std = math.sqrt(1 / (K + 1))
+    #     H_real_blocks = torch.normal(mean, std,
+    #                                  size=[batch_size, number_of_blocks, 1]).to(
+    #         device)
+    #     H_imag_blocks = torch.normal(mean, std,
+    #                                  size=[batch_size, number_of_blocks, 1]).to(
+    #         device)
+    #     H_blocks = torch.zeros(batch_size, number_of_blocks, 2, 2,
+    #                            device=device)
+    #     H_blocks[:, :, 0, 0] = H_real_blocks[:, :, 0]
+    #     H_blocks[:, :, 0, 1] = -H_imag_blocks[:, :, 0]
+    #     H_blocks[:, :, 1, 0] = H_imag_blocks[:, :, 0]
+    #     H_blocks[:, :, 1, 1] = H_real_blocks[:, :, 0]
 
-        # Apply block-wise fading
-        Tx_sig_after_channel_reshaped = torch.matmul(Tx_sig_reshaped, H_blocks)
-        Tx_sig_after_channel = Tx_sig_after_channel_reshaped.view(batch_size,
-                                                                  complex_length,
-                                                                  2)
-        Rx_sig, _ = self.AWGN(Tx_sig_after_channel, n_var)  # Ignore AWGN SNR
+    #     # Apply block-wise fading
+    #     Tx_sig_after_channel_reshaped = torch.matmul(Tx_sig_reshaped, H_blocks)
+    #     Tx_sig_after_channel = Tx_sig_after_channel_reshaped.view(batch_size,
+    #                                                               complex_length,
+    #                                                               2)
+    #     Rx_sig, _ = self.AWGN(Tx_sig_after_channel, n_var)  # Ignore AWGN SNR
 
-        # Equalization with lagged channel estimate
-        Rx_sig_reshaped = Rx_sig.view(batch_size, number_of_blocks, M, 2)
-        H_blocks_lagged = torch.zeros_like(H_blocks)
-        # Initial H (e.g., from pilot before transmission)
-        H_initial = torch.zeros(batch_size, 2, 2, device=device)
-        H_initial[:, 0, 0] = torch.normal(mean, std, size=[batch_size]).to(
-            device)
-        H_initial[:, 0, 1] = -torch.normal(mean, std, size=[batch_size]).to(
-            device)
-        H_initial[:, 1, 0] = H_initial[:, 0, 1].clone()
-        H_initial[:, 1, 1] = H_initial[:, 0, 0].clone()
-        # Assign lagged H: block 1 uses H_initial, block 2 uses H_blocks[:,0], etc.
-        for i in range(number_of_blocks):
-            if i < csi_lag:
-                H_blocks_lagged[:, i, :, :] = H_initial
-            else:
-                H_blocks_lagged[:, i, :, :] = H_blocks[:, i - csi_lag, :, :]
-        H_inv_blocks = torch.inverse(H_blocks_lagged)
-        Rx_sig_equalized_reshaped = torch.matmul(Rx_sig_reshaped, H_inv_blocks)
-        Rx_sig_equalized = Rx_sig_equalized_reshaped.view(batch_size,
-                                                          sequence_length,
-                                                          feature_dim)
+    #     # Equalization with lagged channel estimate
+    #     Rx_sig_reshaped = Rx_sig.view(batch_size, number_of_blocks, M, 2)
+    #     H_blocks_lagged = torch.zeros_like(H_blocks)
+    #     # Initial H (e.g., from pilot before transmission)
+    #     H_initial = torch.zeros(batch_size, 2, 2, device=device)
+    #     H_initial[:, 0, 0] = torch.normal(mean, std, size=[batch_size]).to(
+    #         device)
+    #     H_initial[:, 0, 1] = -torch.normal(mean, std, size=[batch_size]).to(
+    #         device)
+    #     H_initial[:, 1, 0] = H_initial[:, 0, 1].clone()
+    #     H_initial[:, 1, 1] = H_initial[:, 0, 0].clone()
+    #     # Assign lagged H: block 1 uses H_initial, block 2 uses H_blocks[:,0], etc.
+    #     for i in range(number_of_blocks):
+    #         if i < csi_lag:
+    #             H_blocks_lagged[:, i, :, :] = H_initial
+    #         else:
+    #             H_blocks_lagged[:, i, :, :] = H_blocks[:, i - csi_lag, :, :]
+    #     H_inv_blocks = torch.inverse(H_blocks_lagged)
+    #     Rx_sig_equalized_reshaped = torch.matmul(Rx_sig_reshaped, H_inv_blocks)
+    #     Rx_sig_equalized = Rx_sig_equalized_reshaped.view(batch_size,
+    #                                                       sequence_length,
+    #                                                       feature_dim)
 
-        # Noise power using mean norm for realistic SNR
-        fro_norm_squared = torch.norm(H_inv_blocks, p='fro', dim=[2, 3]) ** 2
-        noise_power = 2 * n_var ** 2 * torch.mean(fro_norm_squared, dim=1)
-        snr = 1 / noise_power
-        batch_snr = torch.mean(snr).item()
-        batch_snr_db = 10 * math.log10(batch_snr)
+    #     # Noise power using mean norm for realistic SNR
+    #     fro_norm_squared = torch.norm(H_inv_blocks, p='fro', dim=[2, 3]) ** 2
+    #     noise_power = 2 * n_var ** 2 * torch.mean(fro_norm_squared, dim=1)
+    #     snr = 1 / noise_power
+    #     batch_snr = torch.mean(snr).item()
+    #     batch_snr_db = 10 * math.log10(batch_snr)
 
-        return Rx_sig_equalized, batch_snr_db
+    #     return Rx_sig_equalized, batch_snr_db
     
 def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel, epsilon, lamda_adv):
     model.train()
@@ -303,8 +303,8 @@ def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel, epsi
         Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
     elif channel == 'Rician':
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    # elif channel == 'TimeVaryingRician':
+    #     Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
@@ -338,8 +338,8 @@ def train_step(model, src, trg, n_var, pad, opt_deepsc, criterion, channel, epsi
         Rx_sig_adv, _ = channels.Rayleigh(Tx_sig_adv, n_var)
     elif channel == 'Rician':
         Rx_sig_adv, _ = channels.Rician(Tx_sig_adv, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig_adv, _ = channels.TimeVaryingRician(Tx_sig_adv, n_var)
+    # elif channel == 'TimeVaryingRician':
+    #     Rx_sig_adv, _ = channels.TimeVaryingRician(Tx_sig_adv, n_var)
     
     channel_dec_output_adv = model.channel_decoder(Rx_sig_adv)
     dec_output_adv, _ = model.decoder(trg_inp, channel_dec_output_adv, look_ahead_mask,
@@ -389,8 +389,8 @@ def train_mask(model, src, trg, n_var, pad, opt_mask, criterion, channel):
         Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
     elif channel == 'Rician':
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    # elif channel == 'TimeVaryingRician':
+    #     Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
 
     # channel decoder + decoder
     channel_dec_output = model.channel_decoder(Rx_sig)
@@ -431,8 +431,8 @@ def val_step(model, src, trg, n_var, pad, criterion, channel, seq_to_text):
             Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
         elif channel == 'Rician':
             Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-        elif channel == 'TimeVaryingRician':
-            Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+        # elif channel == 'TimeVaryingRician':
+        #     Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
         
         channel_dec_output = model.channel_decoder(Rx_sig)
         dec_output, _ = model.decoder(trg_inp, channel_dec_output, look_ahead_mask,
@@ -493,8 +493,8 @@ def greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
     elif channel == 'Rician':
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    # elif channel == 'TimeVaryingRician':
+    #     Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
     else:
         raise ValueError(
             "Please choose from AWGN, Rayleigh, Rician, TimeVaryingRician, or 3GPP")
@@ -666,8 +666,8 @@ def debug_greedy_decode(model, src, n_var, max_len, padding_idx, start_symbol,
         Rx_sig, snr = channels.Rayleigh(Tx_sig, n_var)
     elif channel == 'Rician':
         Rx_sig, snr = channels.Rician(Tx_sig, n_var)
-    elif channel == 'TimeVaryingRician':
-        Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
+    # elif channel == 'TimeVaryingRician':
+    #     Rx_sig, snr = channels.TimeVaryingRician(Tx_sig, n_var)
     else:
         raise ValueError(
             "Please choose from AWGN, Rayleigh, Rician, or TimeVaryingRician")

@@ -74,8 +74,6 @@ def train(epoch, args, net):
                                 num_workers=4, pin_memory=True,
                                 collate_fn=collate_pair_data)
     pbar = tqdm(train_iterator)
-    # For TimeVaryingRician
-    # noise_std_options = np.arange(0.045, 0.316, 0.010)
     epoch_loss = 0
     loss_adv_total = 0
     mask_loss = 0
@@ -124,7 +122,6 @@ def validate(epoch, args, net, seq_to_text):
     total = 0
     with torch.no_grad():
         for noise_sents, clean_sents in pbar:
-            # print(f"Batch contains {sents.shape[0]} sentences")
             noise_sents = noise_sents.to(device)
             clean_sents = clean_sents.to(device)
             loss, snr = val_step(net, noise_sents, clean_sents, 0.1, pad_idx, criterion,
@@ -172,8 +169,7 @@ if __name__ == '__main__':
 
     signal.signal(signal.SIGINT, signal_handler)  # Bind Ctrl+C to stop training
     args = parser.parse_args()
-    args.vocab_file = os.path.join('data',
-                                   args.vocab_file)  # Simplified path joining
+    args.vocab_file = os.path.join('data', args.vocab_file)  # Simplified path joining
 
     # Print the selected channel
     print(f"Selected Channel: {args.channel}")
@@ -198,7 +194,7 @@ if __name__ == '__main__':
     for layer in deepsc.decoder.dec_layers:
         mask_params.extend(list(layer.src_mha.mask_perturbation_model.parameters()))
 
-    # Parameters for DeepSC excluding mask — includes calibration (ACN)
+    # Parameters for DeepSC excluding mask
     mask_param_ids = set(id(p) for p in mask_params)
     deepsc_params = [p for p in deepsc.parameters() if id(p) not in mask_param_ids]
     
