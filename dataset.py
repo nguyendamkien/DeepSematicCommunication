@@ -84,7 +84,7 @@ def collate_pair_data(batch):
     batch_size = len(batch)
     target_len = 35
 
-    # Tách src, trg, và labels
+    # Tách src, trg
     noise_sents = [item[0] for item in batch]
     trg_sents = [item[1] for item in batch]
 
@@ -104,7 +104,6 @@ def collate_pair_data(batch):
         noise[i, :noise_len] = noise_sents[i][:noise_len]
         trg[i, :trg_len] = trg_sents[i][:trg_len]
 
-    # return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
     return torch.from_numpy(noise), torch.from_numpy(trg)
 
 
