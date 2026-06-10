@@ -14,10 +14,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import EurDataset, collate_pair_data
-from models.mutual_info import Mine
 from models.transceiver import DeepSC
 from utils import SNR_to_noise, train_step, val_step, initNetParams, \
-    SeqtoText, list_checkpoints, load_checkpoint, train_mi
+    SeqtoText, list_checkpoints, load_checkpoint
 
 plt.ion() # Turn on interactive mode
 
@@ -37,7 +36,6 @@ parser.add_argument('--num-layers', default=4, type=int)
 parser.add_argument('--num-heads', default=8, type=int)
 parser.add_argument('--batch-size', default=128, type=int)
 parser.add_argument('--epochs', default=30, type=int)
-parser.add_argument('--weighdecay', default=1e-4, type=float)
 
 # thêm argument action
 parser.add_argument(
@@ -78,7 +76,7 @@ def train(epoch, args, net):
     batch_count = 0
     snr_values = []
 
-    for noise_sents, trg_sents, label_tensors in pbar:
+    for noise_sents, trg_sents in pbar:
         if stop_training:
             return True, epoch_loss, min(
                 snr_values) if snr_values else 0, max(
@@ -86,9 +84,6 @@ def train(epoch, args, net):
                 snr_values) if snr_values else 0
         noise_sents = noise_sents.to(device)
         trg_sents = trg_sents.to(device)
-        label_tensors = label_tensors.to(device)
-        # noise_std = np.random.choice(noise_std_options, size=1).item()  # Scalar
-        # For original Channel
         noise_std = float(
             np.random.uniform(SNR_to_noise(5), SNR_to_noise(10), size=(1))[0])
         loss_total, snr = train_step(net, noise_sents, trg_sents, noise_std, pad_idx,
@@ -116,11 +111,10 @@ def validate(epoch, args, net, seq_to_text):
     pbar = tqdm(val_iterator)
     total = 0
     with torch.no_grad():
-        for noise_sents, trg_sents, label_tensors in pbar:
+        for noise_sents, trg_sents in pbar:
             # print(f"Batch contains {sents.shape[0]} sentences")
             noise_sents = noise_sents.to(device)
             trg_sents = trg_sents.to(device)
-            label_tensors = label_tensors.to(device)
             loss, snr = val_step(net, noise_sents, trg_sents, 0.1, pad_idx, criterion,
                                  args.channel, seq_to_text)
             total += loss
@@ -181,11 +175,9 @@ if __name__ == '__main__':
     
     deepsc = DeepSC(args.num_layers, num_vocab, num_vocab, num_vocab, num_vocab,
                     args.d_model, args.num_heads, args.dff, 0.1).to(device)
-    mi_net = Mine().to(device)
     criterion = nn.CrossEntropyLoss(reduction='none')
     optimizer = torch.optim.Adam(deepsc.parameters(), lr=1e-4,
-                                 betas=(0.9, 0.98), eps=1e-8, weight_decay=1e-4)
-    mi_opt = torch.optim.Adam(mi_net.parameters(), lr=1e-4)
+                                 betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
 
     initNetParams(deepsc)
 

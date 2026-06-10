@@ -1,31 +1,17 @@
-# !usr/bin/env python
-# -*- coding:utf-8 _*-
-"""
-@Author: Huiqiang Xie
-@File: text_preprocess.py
-@Time: 2021/3/31 22:14
-"""
 import sys # interacting with the python system
 from collections import Counter # count frequency of each element
 
-import nltk # Natural Languages Toolkit - library for NLP
+import nltk # library for NLP
 from matplotlib import pyplot as plt
 import random
 
-# !/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Jan 30 16:44:08 2020
-
-@author: hx301
-"""
-import argparse # Cho phép truyền tham số khi chạy script
+import argparse
 import json # read, write json data
 import os 
 import pickle # Save and load object Python (model, tokenizer, vocab)
-import re # Handle string by regex
+import re 
 import unicodedata # Normalize Unicode
-from tqdm import tqdm # Progress bar - thanh tien trinh
+from tqdm import tqdm # Progress bar 
 from w3lib.html import remove_tags # Remove HTML tags
 
 from generation_error import build_deletion_candidates, build_parallel_dataset
@@ -182,7 +168,7 @@ def build_vocab(sequences, token_to_idx={}, min_token_count=1, delim=' ',
     token_to_count = {}
 
     # Count frequency of each token in the dataset
-    for noise, clean, labels in sequences:
+    for noise, clean in sequences:
         for seq in (noise, clean):
             seq_tokens = tokenize(seq, delim=delim, punct_to_keep=punct_to_keep,
                                 punct_to_remove=punct_to_remove,
@@ -200,29 +186,29 @@ def build_vocab(sequences, token_to_idx={}, min_token_count=1, delim=' ',
     return token_to_idx
 
 # Encode text sequences into numerical representations based on vocabulary
-def encode(seq_tokens, token_to_idx, allow_unk=False):
-    seq_idx = []
-    for token in seq_tokens:
-        if token not in token_to_idx:
-            if allow_unk:
-                token = '<UNK>'
-            else:
-                raise KeyError('Token "%s" not in vocab' % token)
-        seq_idx.append(token_to_idx[token])
-    return seq_idx
+# def encode(seq_tokens, token_to_idx, allow_unk=False):
+#     seq_idx = []
+#     for token in seq_tokens:
+#         if token not in token_to_idx:
+#             if allow_unk:
+#                 token = '<UNK>'
+#             else:
+#                 raise KeyError('Token "%s" not in vocab' % token)
+#         seq_idx.append(token_to_idx[token])
+#     return seq_idx
 
 
 # Decode numerical representations back into tokens
-def decode(seq_idx, idx_to_token, delim=None, stop_at_end=True):
-    tokens = []
-    for idx in seq_idx:
-        tokens.append(idx_to_token[idx])
-        if stop_at_end and tokens[-1] == '<END>':
-            break
-    if delim is None:
-        return tokens
-    else:
-        return delim.join(tokens)
+# def decode(seq_idx, idx_to_token, delim=None, stop_at_end=True):
+#     tokens = []
+#     for idx in seq_idx:
+#         tokens.append(idx_to_token[idx])
+#         if stop_at_end and tokens[-1] == '<END>':
+#             break
+#     if delim is None:
+#         return tokens
+#     else:
+#         return delim.join(tokens)
 
 
 def explore_data(sentences, vocab):
@@ -293,17 +279,6 @@ def main(args):
           removed_by_uniqueness)
     print("Number of sentences after filtering:", len(unique_sentences))
 
-    # # print(unique_sentences[:10])
-
-#     unique_sentences = [
-#     "She is playing football in the park with her friends while they are enjoying the sunny afternoon together outside happily and feeling very excited about their weekend activities planned",
-    
-#     "She goes to school every day to learn new things and meet her friends because she wants to improve herself and achieve her dreams in the future successfully always",
-    
-#     "They are very happy together because they love each other deeply and always support one another through every difficult and joyful moment in life with strong mutual trust always",
-    
-#     "I am beautiful and I know it because I believe in myself and appreciate my unique qualities every single day with confidence and positivity while growing stronger each moment"
-# ]
     print('Build Deletion Candidates')
     deletion_cands = build_deletion_candidates(unique_sentences)
     print(f"Deletion candidates (first 20): {deletion_cands[:100]}\n")
@@ -314,23 +289,6 @@ def main(args):
 
     clean_data = unique_sentences
     parallel_dataset = build_parallel_dataset(clean_data)
-    # for noisy, clean, labels in parallel_dataset[:5]:
-    #     print(f"  CLEAN : {clean}")
-    #     print(f"  NOISY : {noisy}")
-    #     print(f"  LABELS: {labels}")
-    #     print()
-
-    # parallel_dataset = [
-    # ("he playing football .", "he is playing football .", [0, 1, 0, 0, 0]),
-    # ("she go to school", "she went to school", [0, 1, 0, 0]),
-    # ("they are happy", "they are very happy", [0, 0, 1, 0]),
-    # ("i am beautiful","i be beautiful", [0, 1, 0]),]
-
-    # for noisy, clean, labels in parallel_dataset[:10]:
-    #     print(f"  CLEAN : {clean}")
-    #     print(f"  NOISY : {noisy}")
-    #     print(f"  LABELS: {labels}")
-    #     print()
 
     print('Build Vocab')
     # Build the vocabulary from the cleaned dataset
@@ -350,7 +308,7 @@ def main(args):
     print('Start encoding text')
     results = []
     # Encode each sentence into token indices
-    for noise, clean, labels in tqdm(parallel_dataset):
+    for noise, clean in tqdm(parallel_dataset):
         noise_tokens = tokenize(
             noise,
             punct_to_keep=[';', ','],
@@ -364,10 +322,7 @@ def main(args):
         noise_ids = [token_to_idx[w] for w in noise_tokens]
         clean_ids = [token_to_idx[w] for w in clean_tokens]
 
-        # ✅ THÊM START + END LABEL
-        labels = [0] + labels + [0]
-
-        results.append((noise_ids, clean_ids, labels))
+        results.append((noise_ids, clean_ids))
 
     print('Writing Data')
     # Split the data into train, val and test sets
@@ -403,7 +358,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     main(args)
     # debug_process('data/europarl/txt/en/ep-07-05-23-005-04.txt')
-
-
-
-
