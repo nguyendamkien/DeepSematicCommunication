@@ -35,10 +35,10 @@ class EurDataset(Dataset):
         Args:
             index (int): The index of the sample.
         Returns:
-            noise_sents, clean_sents, labels: The noisy sentence, clean sentence, and error labels.
+            sents: The sentence at the given index.
         """
-        noise_sents, clean_sents, labels = self.data[index]
-        return noise_sents, clean_sents, labels
+        sents = self.data[index]
+        return sents
 
     def __len__(self):
         """
@@ -48,34 +48,34 @@ class EurDataset(Dataset):
         """
         return len(self.data)
     
-import numpy as np
-import torch
+# import numpy as np
+# import torch
 
-def collate_data(batch):
-    """
-    Custom function to process a batch of sentences.
-    It pads sentences to the maximum length in the batch to ensure uniform tensor shape.
-    Args:
-        batch: A batch of tokenized sentences.
-    Returns:
-        torch.Tensor: A tensor containing the padded sentences.
-    """
-    batch_size = len(batch) # Number of sentences in the batch
-    target_len = 30  # Fixed length
+# def collate_data(batch):
+#     """
+#     Custom function to process a batch of sentences.
+#     It pads sentences to the maximum length in the batch to ensure uniform tensor shape.
+#     Args:
+#         batch: A batch of tokenized sentences.
+#     Returns:
+#         torch.Tensor: A tensor containing the padded sentences.
+#     """
+#     batch_size = len(batch) # Number of sentences in the batch
+#     target_len = 30  # Fixed length
 
-    # create empty tensor with shape [batch_size, 30], default value = 0 for padding
-    sents = np.zeros((batch_size, target_len),
-                     dtype=np.int64)  # Always [128, 30]
-    sort_by_len = sorted(batch, key=lambda x: len(x), reverse=True)
+#     # create empty tensor with shape [batch_size, 30], default value = 0 for padding
+#     sents = np.zeros((batch_size, target_len),
+#                      dtype=np.int64)  # Always [128, 30]
+#     sort_by_len = sorted(batch, key=lambda x: len(x), reverse=True)
 
-    for i, sent in enumerate(sort_by_len):
-        length = min(len(sent), target_len)  # Truncate if longer than 30
-        sents[i, :length] = sent[:length]  # Fill, rest stays 0
+#     for i, sent in enumerate(sort_by_len):
+#         length = min(len(sent), target_len)  # Truncate if longer than 30
+#         sents[i, :length] = sent[:length]  # Fill, rest stays 0
 
-    # print(f"Batch padded to: {target_len}, Sample: {sents[0].tolist()}")
+#     # print(f"Batch padded to: {target_len}, Sample: {sents[0].tolist()}")
 
-     # Convert NumPy array to a PyTorch tensor for model input
-    return torch.from_numpy(sents)
+#      # Convert NumPy array to a PyTorch tensor for model input
+#     return torch.from_numpy(sents)
 
 import numpy as np
 import torch
@@ -84,29 +84,25 @@ def collate_pair_data(batch):
     batch_size = len(batch)
     target_len = 35
 
-    # 🔥 Tách src, trg, và labels
+    # Tách src, trg, và labels
     noise_sents = [item[0] for item in batch]
     trg_sents = [item[1] for item in batch]
-    labels = [item[2] for item in batch]
 
     # (optional) sort theo độ dài src
     sort_idx = sorted(range(batch_size), key=lambda i: len(noise_sents[i]), reverse=True)
     noise_sents = [noise_sents[i] for i in sort_idx]
     trg_sents = [trg_sents[i] for i in sort_idx]
-    labels = [labels[i] for i in sort_idx]
 
     # tạo tensor padding
     noise = np.zeros((batch_size, target_len), dtype=np.int64)
     trg = np.zeros((batch_size, target_len), dtype=np.int64)
-    label_tensor = np.zeros((batch_size, target_len), dtype=np.float32)
 
     for i in range(batch_size):
         noise_len = min(len(noise_sents[i]), target_len)
         trg_len = min(len(trg_sents[i]), target_len)
-        label_len = min(len(labels[i]), target_len)
 
         noise[i, :noise_len] = noise_sents[i][:noise_len]
         trg[i, :trg_len] = trg_sents[i][:trg_len]
-        label_tensor[i, :label_len] = labels[i][:label_len]
 
-    return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
+    # return torch.from_numpy(noise), torch.from_numpy(trg), torch.from_numpy(label_tensor)
+    return torch.from_numpy(noise), torch.from_numpy(trg)

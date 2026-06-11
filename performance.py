@@ -28,10 +28,6 @@ from utils import BleuScore, SNR_to_noise, greedy_decode, SeqtoText, \
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-dir', default='train_data_with_error.pkl', type=str)
 parser.add_argument('--vocab-file', default='vocab_with_error.json', type=str)
-# parser.add_argument('--checkpoint-path',
-#                     default='/kaggle/working/checkpoints/deepsc-Rayleigh',
-#                     type=str)
-# parser.add_argument('--channel', default='Rayleigh', type=str)
 parser.add_argument('--checkpoint-path',
                     default='/kaggle/working/checkpoints/deepsc-AWGN',
                     type=str)
@@ -186,7 +182,7 @@ def performance(args, SNR, net):
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, (noise_sents, clean_sents, labels) in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, clean_sents) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 
@@ -274,7 +270,7 @@ def performance(args, SNR, net):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    SNR = [-9, -6, -3, 0, 3, 6, 9, 12, 15, 18]
+    SNR = [0, 3, 6, 9, 12, 15, 18]
     # SNR = [18]
     # args.vocab_file = '/kaggle/input/deepsc/data/' + args.vocab_file
     args.vocab_file = './data/' + args.vocab_file
