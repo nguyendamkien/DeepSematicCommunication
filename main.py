@@ -76,7 +76,7 @@ def train(epoch, args, net, mi_net=None):
     batch_count = 0
     snr_values = []
 
-    for noise_sents, clean_sents, labels in pbar:
+    for noise_sents, clean_sents in pbar:
         if stop_training:
             return True, epoch_loss, mask_loss, min(
                 snr_values) if snr_values else 0, max(
@@ -118,7 +118,7 @@ def validate(epoch, args, net, seq_to_text):
     pbar = tqdm(val_iterator)
     total = 0
     with torch.no_grad():
-        for noise_sents, clean_sents, labels in pbar:
+        for noise_sents, clean_sents in pbar:
             noise_sents = noise_sents.to(device)
             clean_sents = clean_sents.to(device)
             loss, snr = val_step(net, noise_sents, clean_sents, 0.1, pad_idx, criterion,
@@ -198,7 +198,7 @@ if __name__ == '__main__':
     optimizer_deepsc = torch.optim.Adam(deepsc_params, lr=1e-4,
                                  betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
     optimizer_mask = torch.optim.Adam(mask_params, lr=1e-4,
-                                 betas=(0.9, 0.98), eps=1e-8, weight_decay=5e-4)
+                                 betas=(0.9, 0.98), eps=1e-8)
 
     initNetParams(deepsc)
 

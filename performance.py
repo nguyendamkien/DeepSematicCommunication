@@ -182,13 +182,12 @@ def performance(args, SNR, net):
                 # Progress bar to monitor sample processing
                 with tqdm(total=total_samples_per_epoch,
                           desc=f"SNR {snr} dB - Epoch {epoch + 1}") as pbar:
-                    for batch_idx, (noise_sents, clean_sents, label) in enumerate(test_iterator):
+                    for batch_idx, (noise_sents, clean_sents) in enumerate(test_iterator):
                         if samples_processed >= total_samples_per_epoch:
                             break  # Stop once we've processed the desired number of samples
 
                         noise_sents = noise_sents.to(device)
                         target = clean_sents.to(device)
-                        label = label.to(device)
                         out, snr_value = greedy_decode(net, noise_sents, noise_std,
                                                        args.MAX_LENGTH, pad_idx,
                                                        start_idx,
